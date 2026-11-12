@@ -1,10 +1,10 @@
 # Coding agents
 
-`stow/agents/` configures two coding agents, opencode and Claude Code, from one package. The two
+The `agents` module (`modules/tools/agents/`) configures two coding agents, opencode and Claude Code, from one `home/`. The two
 share a rules file and four skills. Each file exists once in the repository.
 
 ```
-stow/agents/
+modules/tools/agents/home/
 ├── .config/opencode/
 │   ├── opencode.json          # provider, models, permissions, the build and plan agents
 │   ├── AGENTS.md              # the working rules, for both tools
@@ -56,9 +56,9 @@ Commit them or revert them.
 
 ## Environment
 
-`stow/zsh/.config/zsh/conf.d/55-opencode.zsh` turns off opencode's background subagents. The
+`modules/tools/zsh/home/.config/zsh/conf.d/55-opencode.zsh` turns off opencode's background subagents. The
 gateway allows three concurrent requests, and background fan-out stacks requests past that limit
 until they time out.
 
-Both programs are in `packages/dev.json`: `opencode` from the repositories and `claude-code`
-from the AUR.
+Both programs are in the `agents` module's `install` recipe: `opencode` from the repositories and
+`claude-code` from the AUR.
