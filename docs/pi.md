@@ -11,6 +11,7 @@ modules/tools/pi/
 │   ├── .local/bin/pi                 # the wrapper: sets the environment, runs the install
 │   └── .pi/agent/
 │       ├── models.json               # ollama
+│       ├── extensions/guardrails/    # allow, ask and deny rules; rules.json holds them
 │       └── AGENTS.md -> ../../../../agents-common/home/.config/agents/AGENTS.md
 ├── merge/.pi/agent/settings.json     # only the keys this repository owns
 └── emit/pi/                          # the theme, and its fallback
@@ -81,8 +82,49 @@ so the rules, the commit rule included, apply to Pi. Pi reads `~/.agents/skills`
 `~/.pi/agent/skills`, not `~/.claude/skills`; the `skills` setting above is what brings the shared
 skills in, with no copy.
 
-Pi has no subagents, plan mode, permission prompts or web access of its own. MCP servers go in
+Pi has no subagents, plan mode or web access of its own, and no permission prompts: the
+guardrails extension adds them. MCP servers go in
 `~/.pi/agent/mcp.json`, which Pi also rewrites from `/mcp`, so the module does not ship one.
+
+## Guardrails
+
+`extensions/guardrails/` is a global Pi extension, loaded from `~/.pi/agent/extensions`. Its rules
+are data in `rules.json`, ported from the `permission` block of opencode's `opencode.json` and from
+its `guardrails.js`. Each table reads general to specific and the last matching rule wins, as in
+opencode. `*` matches anything, slashes included, and a trailing ` *` also matches the bare
+command (`ls *` allows `ls`).
+
+| Table | Decides |
+|---|---|
+| `tools` | a tool by name: `edit` and `write` ask, `powershell` is denied, the rest allowed |
+| `bash` | each simple command, as its words joined by spaces |
+| `bashRegex` | destructive commands: forced recursive delete, force-push, push to `master`/`main`/`release/`, `dd of=`, `DROP TABLE` |
+| `interpreters`, `opaque` | a pipe into a shell or interpreter is denied; `eval`, `exec`, `source`, `.` and `sh -c` ask |
+| `paths` | secrets (`.env`, `*.pem`, `*.key`, SSH keys) are denied, as a tool path and as a word or redirection target of a bash command; `.env.example` is allowed |
+| `external` | a path outside the project asks, except `/tmp`, `/var/tmp` and `~/.pi/agent/plans` |
+
+`ask` opens Pi's confirm dialog. With no UI (print and JSON mode) it means deny, and the reason says
+so. The strictest verdict across a command list wins. `rules.ts` tokenizes the shell subset (words,
+quotes, `&&`, `||`, `;`, `|`, `&`, redirections); a command it cannot parse is denied, and
+`$(...)`, backticks, subshells, heredocs and process substitution ask. Parsing stops at such a
+construct, so what precedes it is still checked for deny. A redirection to a file outside `/tmp`
+and `/dev/null` asks.
+
+Denied tools are removed from the active set at `session_start` and `before_agent_start`, and
+`tool_call` blocks them anyway, because codemode can call a tool that is not active. A tool result
+over `maxOutputChars` keeps its first and last half with a note of how much was cut.
+
+The commit rule is `agents-common`'s section 11, enforced: a `git commit` whose `-m`, `--message`
+or `-F` text holds `Co-Authored-By`, "Generated with", `Claude` (any case) or the words `Pi` or
+`AI` is refused. An editor commit, or `-F -`, has no message to read and is allowed. When the
+message sits in a `$(cat <<EOF ...)` the whole command text is scanned instead.
+
+`OTHALA_TASK_FILES`, a `:`-separated list of globs relative to the project, confines `edit` and
+`write` to those paths. Nothing sets it yet: the `tasks` extension will, for its child runners.
+Bash is not confined by it.
+
+The pure logic (`rules.ts`, no Pi imports) is tested by `modules/tools/pi/test/`, which
+`.ci/check.sh` runs with `node --test`.
 
 ## Theme
 
