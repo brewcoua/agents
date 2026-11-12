@@ -103,7 +103,7 @@ command (`ls *` allows `ls`).
 | `bashRegex` | destructive commands: forced recursive delete, force-push, push to `master`/`main`/`release/`, `dd of=`, `DROP TABLE` |
 | `interpreters`, `opaque` | a pipe into a shell or interpreter is denied; `eval`, `exec`, `source`, `.` and `sh -c` ask |
 | `paths` | secrets (`.env`, `*.pem`, `*.key`, SSH keys) are denied, as a tool path and as a word or redirection target of a bash command; `.env.example` is allowed |
-| `external` | a path outside the project asks, except `/tmp`, `/var/tmp` and `~/.pi/agent/plans` |
+| `external` | a path outside the project asks, except `/tmp` and `/var/tmp` |
 
 `ask` opens Pi's confirm dialog. With no UI (print and JSON mode) it means deny, and the reason says
 so. The strictest verdict across a command list wins. `rules.ts` tokenizes the shell subset (words,
@@ -121,9 +121,17 @@ or `-F` text holds `Co-Authored-By`, "Generated with", `Claude` (any case) or th
 `AI` is refused. An editor commit, or `-F -`, has no message to read and is allowed. When the
 message sits in a `$(cat <<EOF ...)` the whole command text is scanned instead.
 
-`OTHALA_TASK_FILES`, a `:`-separated list of globs relative to the project, confines `edit` and
-`write` to those paths. Nothing sets it yet: the `tasks` extension will, for its child runners.
-Bash is not confined by it.
+`edit` and `write` under `<project>/.pi/plans/` are allowed without asking, in every session: the
+`tasks` extension has the model write its plan and task files there, including in print mode, where
+nothing could answer.
+
+The `tasks` extension starts each task's child `pi` with two variables, and guardrails then runs in
+task mode. `OTHALA_TASK_FILES`, a `:`-separated list of globs relative to the project, allows `edit`
+and `write` to those paths and refuses every other path. `OTHALA_TASK_VERIFY` is the task's verify
+command: a bash command equal to it is allowed, as is `git add <paths>` where every path is one of
+the task's files, and `git commit`, to which the commit rule still applies. Everything else follows
+the normal rules, and `ask` means deny, since a child has nobody to answer. Bash is otherwise not
+confined by `OTHALA_TASK_FILES`; the land step checks the diff.
 
 The pure logic (`rules.ts`, no Pi imports) is tested by `modules/tools/pi/test/`, which
 `.ci/check.sh` runs with `node --test`.
@@ -164,8 +172,8 @@ Caps spend per session. It adds up cost and tokens (`input + output`) from each 
 
 ## Tasks
 
-The `tasks` extension plans before it builds. This half covers planning and review, and the small
-change; a task tree that runs in worktrees comes next, as `/tasks run`.
+The `tasks` extension plans before it builds, then runs the plan's tasks in git worktrees, each in a
+child `pi`. Planning and review come first; a small change is implemented in the same session.
 
 ### Tiers
 
@@ -187,7 +195,6 @@ read-only: `edit` and `write` are refused outside `.pi/plans/`, and `bash` runs 
 allow without asking. An `ask` verdict counts as a refusal here, since the model has nobody to ask.
 Other tools (memory, MCP, codemode) are refused too. The model asks you with `ask_user_question`,
 researches with `read`, `grep`, `find`, `ls` and `scout`, and writes `.pi/plans/<slug>.md`.
-Guardrails still ask before each `edit` or `write`, plan file included.
 
 `scout` takes up to 6 questions and runs one child `pi` per question, in parallel, on the `small`
 model: print mode, `--no-session`, only `read`, `grep`, `find`, `ls`, no MCP, and `-na`, so a
@@ -239,7 +246,42 @@ line under them, in insert mode.
 
 `/plan approve` checks that the plan parses, sets `status: approved`, leaves plan mode and restores the
 model. A small plan is then implemented in the same session. A plan with several tasks stays approved
-for `/tasks run`, which does not exist yet.
+for `/tasks run`. `/plan approve` also compiles it (below), so a plan that cannot run is refused with the
+reason and stays a draft; an approved multi-task plan starts running at once.
+
+### Running tasks
+
+`/tasks run [slug]` runs an approved plan, or resumes one; without a slug it takes the only open plan.
+`/tasks status [slug]` prints each task's status. Both want the TUI or RPC: Pi does not run extension commands
+in print mode. The plan file gains an optional `## Finish` section, one line holding the command that runs the
+project's full tests. The run goes through these steps:
+
+1. Compile. The plan becomes `.pi/plans/<slug>.json`: the plan's title, goal, decisions and finish command,
+   and each task with `status` (`pending`, `running`, `review`, `done`, `failed`), and `attempts` and `notes`
+   after a failure. The file is the state. Compiling refuses unknown dependencies, a cycle, and two tasks that
+   are not ordered by `deps` and have overlapping `files`, naming the overlap. Two globs are taken to overlap
+   unless their fixed beginnings or endings differ.
+2. Execute. A task is ready when it is pending and its dependencies are done; a batch is up to `maxConcurrent`
+   ready tasks, which compiling made disjoint. Each gets `git worktree add .pi/worktrees/<id> -B pi-task-<id> HEAD`
+   (characters git dislikes in the id become `_`) and a child `pi` there: `pi -p --no-session --no-mcp -na`
+   on the tier's model, whose only prompt is the plan's goal and decisions plus the task's title, files, verify
+   command and accept line. The child edits, runs verify, and commits in its worktree, with `OTHALA_TASK_FILES`
+   and `OTHALA_TASK_VERIFY` set (see Guardrails). With `sccache` on PATH, `RUSTC_WRAPPER=sccache` is set too, so
+   Cargo's per-worktree `target/` shares compiles; other languages need nothing. A child has 30 minutes.
+3. Check. No model reads the diff: the parent checks that nothing is uncommitted, that there is a commit,
+   that every file in `git diff --name-only <base> HEAD` matches the task's `files`, and re-runs the verify
+   command in the worktree. A failure goes back to a fresh worktree and a new child with the failure as notes.
+   Two failures on the task's tier give a third attempt on `large`; after that the task is `failed`, the run
+   stops, and its worktree stays for you to look at.
+4. Land. The batch's passing tasks are cherry-picked onto the current branch one at a time, then the worktree
+   and its branch are removed. A cherry-pick that does not apply is aborted and fails the task. Later batches
+   branch from the new HEAD, so they see their dependencies.
+5. Finish. When every task is done, the `## Finish` command runs in the project; if it fails the run stays open and
+   `/tasks run` repeats it. Then the plan file is marked `status: done` and a summary of the tasks is shown.
+
+`/tasks run` on a plan that stopped puts `running`, `review` and `failed` tasks back to `pending` with their
+attempts reset. Their worktrees are listed and you are asked before they are discarded; with no UI nothing
+is deleted and the list is the message.
 
 ## Theme
 

@@ -1,14 +1,17 @@
 import { spawn } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { basename, join } from "node:path"
 import { Type } from "typebox"
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import rules from "../guardrails/rules.json"
 import type { Rules } from "../guardrails/rules.ts"
+import { gitIO, leftovers, worktreeDir } from "./git.ts"
 import {
-  PLANS_DIR, type Plan, commentsMessage, implementMessage, isSmall, parseComments, parsePlan,
-  planPrompt, planVerdict, slug, uniqueSlug, withStatus,
+  PLANS_DIR, commentsMessage, implementMessage, isSmall, parseComments, parsePlan,
+  planPrompt, planStatus, planVerdict, slug, uniqueSlug, withStatus,
 } from "./plan.ts"
+import { type RunPlan, compile, start, summary } from "./run.ts"
+import { runPlan } from "./runner.ts"
 import { MAX_SCOUTS, SCOUT_TIMEOUT_MS, formatScouts, scoutArgs } from "./scout.ts"
 import { type Model, parseTiers } from "./tiers.ts"
 
@@ -118,10 +121,90 @@ export default function (pi: ExtensionAPI) {
     pi.sendUserMessage(commentsMessage(state.path, comments))
   }
 
-  // SEAM for part 2: a plan with a task tree is approved, valid, and on disk. `/tasks run`
-  // compiles it to .pi/plans/<slug>.json (steps 3 to 7 of the workflow) and starts here.
-  function runTasks(path: string, _plan: Plan, ctx: ExtensionCommandContext) {
-    ctx.ui.notify(`${path} is approved. Its tasks are executed by /tasks run, which is not available yet.`, "info")
+  // Plans on disk: <slug>.md is the plan, <slug>.json the task tree that /tasks run keeps up to date.
+  const jsonPath = (ctx: ExtensionCommandContext, name: string) => join(ctx.cwd, PLANS_DIR, `${name}.json`)
+  const loadRun = (ctx: ExtensionCommandContext, name: string) => {
+    try {
+      return JSON.parse(readFileSync(jsonPath(ctx, name), "utf8")) as RunPlan
+    } catch {
+      return undefined
+    }
+  }
+  const saveRun = (ctx: ExtensionCommandContext) => (run: RunPlan) => writeFileSync(jsonPath(ctx, run.slug), `${JSON.stringify(run, null, 2)}\n`)
+
+  // Plans not finished: an approved plan, or a task tree that has not reached done.
+  function open(ctx: ExtensionCommandContext): string[] {
+    const dir = join(ctx.cwd, PLANS_DIR)
+    if (!existsSync(dir)) return []
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(".md"))
+      .map((f) => basename(f, ".md"))
+      .filter((n) => {
+        const run = loadRun(ctx, n)
+        return run ? run.status !== "done" : planStatus(readFileSync(join(dir, `${n}.md`), "utf8")) === "approved"
+      })
+  }
+
+  function pick(arg: string, ctx: ExtensionCommandContext): string | undefined {
+    if (arg) return arg
+    const names = open(ctx)
+    if (names.length === 1) return names[0]
+    ctx.ui.notify(names.length ? `Several plans are open; name one: ${names.join(", ")}` : "No approved plan is waiting.", "warning")
+  }
+
+  let running = false
+
+  // COMPILE (first time), then EXECUTE to FINISH; a task tree on disk is resumed.
+  async function execute(name: string, ctx: ExtensionCommandContext) {
+    if (running) return ctx.ui.notify("Tasks are already running.", "warning")
+    const save = saveRun(ctx)
+    let run = loadRun(ctx, name)
+    if (!run) {
+      const file = join(ctx.cwd, PLANS_DIR, `${name}.md`)
+      if (!existsSync(file)) return ctx.ui.notify(`No plan ${name} in ${PLANS_DIR}/.`, "error")
+      const text = readFileSync(file, "utf8")
+      if (planStatus(text) !== "approved") return ctx.ui.notify(`${name} is not approved. Run /plan approve first.`, "warning")
+      const plan = parsePlan(text)
+      const c = plan.errors.length ? { errors: plan.errors, run: undefined } : compile(plan, text, name)
+      if (!c.run) return ctx.ui.notify(`${name} cannot run:\n- ${c.errors.join("\n- ")}`, "error")
+      run = c.run
+    }
+    if (run.status === "done") return ctx.ui.notify(`${name} is already done.`, "info")
+    let tiers
+    try {
+      tiers = loadTiers()
+    } catch (e) {
+      return ctx.ui.notify(`/tasks: ${e instanceof Error ? e.message : e}`, "error")
+    }
+    start(run)
+    const left = leftovers(ctx.cwd, run)
+    const io = gitIO(ctx.cwd, tiers, save, (m) => {
+      ctx.ui.setStatus("tasks", m)
+      if (!ctx.hasUI) ctx.ui.notify(m, "info")
+    })
+    if (left.length) {
+      const list = left.map((t) => `${t.id}: ${worktreeDir(ctx.cwd, t)}`).join("\n")
+      if (!(ctx.hasUI && (await ctx.ui.confirm("Unfinished worktrees", `These tasks were interrupted and their worktrees remain:\n${list}\n\nDiscard them and run the tasks again?`)))) {
+        return ctx.ui.notify(`Interrupted worktrees remain; nothing was deleted:\n${list}\nRemove them with git worktree remove --force and git branch -D, then /tasks run again.`, "warning")
+      }
+      for (const t of left) await io.remove(t)
+    }
+    save(run)
+    running = true
+    try {
+      const r = await runPlan(run, tiers.maxConcurrent, io)
+      if (r.ok) {
+        const file = join(ctx.cwd, PLANS_DIR, `${name}.md`)
+        writeFileSync(file, withStatus(readFileSync(file, "utf8"), "done"))
+      }
+      ctx.ui.notify(r.message, r.ok ? "info" : "error")
+    } catch (e) {
+      save(run)
+      ctx.ui.notify(`/tasks: ${e instanceof Error ? e.message : e}\nThe task file ${PLANS_DIR}/${name}.json holds the state; /tasks run resumes.`, "error")
+    } finally {
+      running = false
+      ctx.ui.setStatus("tasks", undefined)
+    }
   }
 
   async function approve(ctx: ExtensionCommandContext) {
@@ -131,13 +214,31 @@ export default function (pi: ExtensionAPI) {
     const text = readFileSync(file, "utf8")
     const plan = parsePlan(text)
     if (plan.errors.length) return ctx.ui.notify(`The plan cannot be approved:\n- ${plan.errors.join("\n- ")}`, "error")
+    const name = basename(state.path, ".md")
+    if (!isSmall(plan)) {
+      const c = compile(plan, text, name)
+      if (!c.run) return ctx.ui.notify(`The plan cannot be approved:\n- ${c.errors.join("\n- ")}`, "error")
+    }
     const approved = withStatus(text, "approved")
     writeFileSync(file, approved)
     const path = state.path
     await leave(ctx)
     if (isSmall(plan)) pi.sendUserMessage(implementMessage(path, approved))
-    else runTasks(path, plan, ctx)
+    else await execute(name, ctx)
   }
+
+  pi.registerCommand("tasks", {
+    description: "Run an approved plan's tasks in worktrees: /tasks run [slug] (also resumes), /tasks status [slug]",
+    handler: async (args, ctx) => {
+      const [sub, arg = ""] = args.trim().split(/\s+/)
+      if (sub !== "run" && sub !== "status") return ctx.ui.notify("usage: /tasks run [slug] | /tasks status [slug]", "info")
+      const name = pick(arg, ctx)
+      if (!name) return
+      if (sub === "run") return execute(name, ctx)
+      const run = loadRun(ctx, name)
+      ctx.ui.notify(run ? summary(run) : `${name} has not been compiled yet. /tasks run ${name} does it.`, "info")
+    },
+  })
 
   pi.registerCommand("plan", {
     description: "Plan before building: /plan <request>, then /plan review and /plan approve (/plan cancel leaves)",

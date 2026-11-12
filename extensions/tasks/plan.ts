@@ -165,7 +165,10 @@ status: draft
 
 Ids are strings ("1", "2", "2.1"); "2.1" is a subtask of "2" unless a \`- parent:\` line says otherwise.
 Tasks whose files overlap must depend on each other. Tier small is for mechanical, well-specified work, large for the rest.
-A small change is one task (or no Tasks section).`
+A small change is one task (or no Tasks section).
+
+## Finish
+<optional: one command that runs the project's full test suite once every task has landed>`
 
 export function planPrompt(path: string): string {
   return [

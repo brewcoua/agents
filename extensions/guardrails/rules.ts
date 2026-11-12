@@ -289,6 +289,64 @@ export function checkCommit(command: string, readFile: (path: string) => string 
   return undefined
 }
 
+const PATH_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"])
+
+export function isPlanFile(cwd: string, path: string): boolean {
+  return resolve(cwd, path).startsWith(`${cwd}/.pi/plans/`)
+}
+
+// What a task's child may run besides its verify command: `git add <paths>` where every path is
+// one of the task's files, and `git commit`. Nothing piped, redirected or substituted.
+export function taskGit(command: string, files: string[], cwd: string): boolean {
+  const parsed = parse(command)
+  if (parsed.error || parsed.ask.length || !parsed.commands.length) return false
+  return parsed.commands.every((c) => {
+    const [git, sub, ...args] = c.words
+    if (git !== "git" || c.piped || c.redirects.length) return false
+    if (sub === "commit") return true
+    if (sub !== "add") return false
+    const paths = args[0] === "--" ? args.slice(1) : args
+    return (
+      paths.length > 0 &&
+      paths.every((p) => {
+        const abs = resolve(cwd, p)
+        return !p.startsWith("-") && abs.startsWith(`${cwd}/`) && files.some((g) => glob(g, abs.slice(cwd.length + 1)))
+      })
+    )
+  })
+}
+
+export type Env = {
+  home: string
+  readFile: (path: string) => string | undefined
+  taskFiles?: string[] // OTHALA_TASK_FILES: set in a task's child pi
+  taskVerify?: string // OTHALA_TASK_VERIFY
+}
+
+// The verdict for one tool call. In a task's child nobody can answer, so ask becomes deny.
+export function decide(rules: Rules, env: Env, toolName: string, input: Record<string, unknown>, cwd: string): Decision {
+  let d: Decision = { verdict: toolVerdict(rules, toolName), reason: `the ${toolName} tool needs confirmation` }
+  if (d.verdict === "deny") return { verdict: "deny", reason: `the ${toolName} tool is denied` }
+
+  if (toolName === "bash") {
+    const command = String(input.command ?? "")
+    if (command === env.taskVerify) return { verdict: "allow", reason: "" }
+    d = strictest(d, checkCommand(rules, command, cwd))
+    if (d.verdict === "ask" && env.taskFiles && taskGit(command, env.taskFiles, cwd)) d = { verdict: "allow", reason: "" }
+    d = strictest(d, checkCommit(command, (p) => env.readFile(resolve(cwd, p))) ?? d)
+  } else if (PATH_TOOLS.has(toolName)) {
+    const path = String(input.path ?? input.file_path ?? ".")
+    const edits = toolName === "edit" || toolName === "write"
+    const abs = resolve(cwd, path)
+    const inTask = abs.startsWith(`${cwd}/`) && env.taskFiles?.some((g) => glob(g, abs.slice(cwd.length + 1)))
+    if (edits && (isPlanFile(cwd, path) || inTask)) d = { verdict: "allow", reason: "" }
+    d = strictest(d, checkPath(rules, cwd, env.home, path))
+    if (env.taskFiles && edits && !inTask) d = { verdict: "deny", reason: `${path} is outside the files of this task` }
+  }
+  if (env.taskFiles && d.verdict === "ask") d = { verdict: "deny", reason: `${d.reason}, and a task cannot ask` }
+  return d
+}
+
 // Keeps both ends: a command's verdict is usually in its last lines.
 export function cap(text: string, max: number): string | undefined {
   if (text.length <= max) return undefined

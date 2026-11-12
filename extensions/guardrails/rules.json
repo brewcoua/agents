@@ -182,8 +182,7 @@
   "external": {
     "*": "ask",
     "/tmp/*": "allow",
-    "/var/tmp/*": "allow",
-    "~/.pi/agent/plans/*": "allow"
+    "/var/tmp/*": "allow"
   },
   "maxOutputChars": 30000
 }

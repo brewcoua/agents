@@ -1,0 +1,99 @@
+// The scheduler: steps 4 to 7 of the workflow over an injected IO, so node --test drives it
+// with fakes. git.ts is the IO that runs git and the child pi processes.
+
+import { MAX_ATTEMPTS, type RunPlan, type RunTask, childPrompt, filesOutside, nextBatch, safeId, summary, tail, tierFor } from "./run.ts"
+import type { Tier } from "./tiers.ts"
+
+export type Output = { code: number | null; output: string }
+export type IO = {
+  save(run: RunPlan): void
+  log(message: string): void
+  prepare(t: RunTask): Promise<void> // the task's worktree at the current HEAD, empty
+  child(t: RunTask, tier: Tier, prompt: string): Promise<Output>
+  changed(t: RunTask): Promise<{ files: string[]; uncommitted: string[] }> // against the base commit
+  verify(t: RunTask): Promise<Output>
+  land(t: RunTask): Promise<string | undefined> // an error text, or nothing
+  remove(t: RunTask): Promise<void>
+  finish(command: string): Promise<Output>
+}
+
+// CHECK: what the parent can establish without a model. The notes go back to the child.
+async function check(t: RunTask, io: IO, child: Output): Promise<string | undefined> {
+  const { files, uncommitted } = await io.changed(t)
+  if (uncommitted.length) return `Uncommitted changes were left: ${uncommitted.join(", ")}. Commit them, or remove them.`
+  if (!files.length) return `No commit was made${child.code ? ` (pi exited ${child.code}: ${tail(child.output, 800)})` : ""}.`
+  const outside = filesOutside(files, t.files)
+  if (outside.length) return `The commits touch files outside the task's files: ${outside.join(", ")}. Touch only ${t.files.join(", ")}.`
+  const v = await io.verify(t)
+  if (v.code !== 0) return `The verify command \`${t.verify}\` failed (exit ${v.code}):\n${tail(v.output, 3000)}`
+  return undefined
+}
+
+async function attempt(run: RunPlan, t: RunTask, io: IO): Promise<void> {
+  for (;;) {
+    const tier = tierFor(t)
+    io.log(`task ${t.id}: attempt ${(t.attempts ?? 0) + 1} on the ${tier} tier`)
+    const child = await io.child(t, tier, childPrompt(run, t))
+    const failure = await check(t, io, child)
+    if (!failure) {
+      t.status = "review"
+      delete t.notes
+      return io.save(run)
+    }
+    t.attempts = (t.attempts ?? 0) + 1
+    t.notes = failure
+    if (t.attempts >= MAX_ATTEMPTS) {
+      t.status = "failed"
+      return io.save(run)
+    }
+    io.save(run)
+    await io.prepare(t)
+  }
+}
+
+export async function runPlan(run: RunPlan, maxConcurrent: number, io: IO): Promise<{ ok: boolean; message: string }> {
+  let landFailed = false
+  for (;;) {
+    const batch = nextBatch(run, maxConcurrent)
+    if (!batch.length) break
+    for (const t of batch) t.status = "running"
+    io.save(run)
+    io.log(`running ${batch.map((t) => t.id).join(", ")}`)
+    for (const t of batch) await io.prepare(t) // one at a time: git locks the repository while it adds
+    await Promise.all(batch.map((t) => attempt(run, t, io)))
+
+    // LAND: one task at a time. The batch is unordered, so the plan's order is a dependency order.
+    for (const t of batch.filter((t) => t.status === "review")) {
+      const error = await io.land(t)
+      if (error) {
+        t.status = "failed"
+        t.notes = `Landing failed: ${error}`
+        landFailed = true
+        io.save(run)
+        break
+      }
+      t.status = "done"
+      await io.remove(t)
+      io.save(run)
+      io.log(`task ${t.id} landed`)
+    }
+    if (landFailed || batch.some((t) => t.status === "failed")) break
+  }
+
+  const failed = run.tasks.filter((t) => t.status === "failed")
+  if (failed.length) {
+    const why = failed.map((t) => `task ${t.id} ${t.title}: ${t.notes}\n  worktree .pi/worktrees/${safeId(t.id)} kept`).join("\n")
+    return { ok: false, message: `Stopped.\n${why}\n/tasks run retries the failed tasks.\n\n${summary(run)}` }
+  }
+  if (run.tasks.some((t) => t.status !== "done")) return { ok: false, message: `Stopped with tasks that cannot start.\n${summary(run)}` }
+
+  // FINISH
+  if (run.finish) {
+    io.log(`finish: ${run.finish}`)
+    const f = await io.finish(run.finish)
+    if (f.code !== 0) return { ok: false, message: `Every task landed, but \`${run.finish}\` failed (exit ${f.code}):\n${tail(f.output, 3000)}\n/tasks run repeats it.` }
+  }
+  run.status = "done"
+  io.save(run)
+  return { ok: true, message: summary(run) }
+}

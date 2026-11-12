@@ -2,26 +2,14 @@ import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import rules from "./rules.json"
-import {
-  type Decision,
-  type Rules,
-  cap,
-  checkCommand,
-  checkCommit,
-  checkPath,
-  glob,
-  resolve,
-  strictest,
-  toolVerdict,
-} from "./rules.ts"
+import { type Env, type Rules, cap, decide, toolVerdict } from "./rules.ts"
 
 const R = rules as Rules
 
-// A task runner (the future `tasks` extension) sets this to a ":"-separated list
-// of globs, relative to the project directory; edit and write outside them are refused.
+// The tasks extension sets this in a task's child pi: a ":"-separated list of globs, relative to
+// the project directory. Edit and write outside them are refused, and nothing asks. OTHALA_TASK_VERIFY
+// is the one bash command the task may run besides `git add` of its files and `git commit`.
 const TASK_FILES = process.env.OTHALA_TASK_FILES?.split(":").filter(Boolean)
-
-const PATH_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"])
 
 function readFile(path: string): string | undefined {
   try {
@@ -31,29 +19,10 @@ function readFile(path: string): string | undefined {
   }
 }
 
-function decide(toolName: string, input: Record<string, unknown>, cwd: string): Decision {
-  let d: Decision = { verdict: toolVerdict(R, toolName), reason: `the ${toolName} tool needs confirmation` }
-  if (d.verdict === "deny") return { verdict: "deny", reason: `the ${toolName} tool is denied` }
-
-  if (toolName === "bash") {
-    const command = String(input.command ?? "")
-    d = strictest(d, checkCommand(R, command, cwd))
-    d = strictest(d, checkCommit(command, (p) => readFile(resolve(cwd, p))) ?? d)
-  } else if (PATH_TOOLS.has(toolName)) {
-    const path = String(input.path ?? input.file_path ?? ".")
-    d = strictest(d, checkPath(R, cwd, homedir(), path))
-    if (TASK_FILES && (toolName === "edit" || toolName === "write")) {
-      const rel = resolve(cwd, path).slice(cwd.length + 1)
-      if (!TASK_FILES.some((g) => glob(g, rel))) {
-        d = { verdict: "deny", reason: `${path} is outside the files of this task` }
-      }
-    }
-  }
-  return d
-}
+const env: Env = { home: homedir(), readFile, taskFiles: TASK_FILES, taskVerify: process.env.OTHALA_TASK_VERIFY }
 
 async function enforce(toolName: string, input: Record<string, unknown>, ctx: ExtensionContext) {
-  const d = decide(toolName, input, ctx.cwd)
+  const d = decide(R, env, toolName, input, ctx.cwd)
   if (d.verdict === "allow") return undefined
   if (d.verdict === "deny") return { block: true, reason: `Blocked by guardrails: ${d.reason}.` }
   if (!ctx.hasUI) {

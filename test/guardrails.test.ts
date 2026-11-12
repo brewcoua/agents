@@ -6,7 +6,11 @@ import {
   checkCommand,
   checkCommit,
   checkPath,
+  decide,
+  type Env,
+  isPlanFile,
   parse,
+  taskGit,
   toolVerdict,
   type Rules,
 } from "../home/.pi/agent/extensions/guardrails/rules.ts"
@@ -111,7 +115,7 @@ test("paths", () => {
   assert.equal(p("../etc/passwd"), "ask")
   assert.equal(p("/tmp/x"), "allow")
   assert.equal(p("/etc/hosts"), "ask")
-  assert.equal(p("~/.pi/agent/plans/a.md"), "allow")
+  assert.equal(p("~/.pi/agent/plans/a.md"), "ask")
   assert.equal(p(".env"), "deny")
   assert.equal(p("/tmp/.env"), "deny")
   assert.equal(p("deploy/.env.example"), "allow")
@@ -170,4 +174,66 @@ test("output cap", () => {
   assert.ok(out?.startsWith("x".repeat(5)))
   assert.ok(out?.endsWith("x".repeat(5)))
   assert.match(out ?? "", /5 of 15 characters removed/)
+})
+
+const env: Env = { home: "/home/u", readFile: read }
+const task = { ...env, taskFiles: ["src/pkg.rs", "tests/*.rs"], taskVerify: "cargo test pkg::" }
+const call = (e: Env, tool: string, input: Record<string, unknown>) => decide(rules, e, tool, input, "/work").verdict
+
+test("plan files under .pi/plans are written without asking, everywhere", () => {
+  assert.equal(call(env, "write", { path: ".pi/plans/a.md" }), "allow")
+  assert.equal(call(env, "edit", { path: "/work/.pi/plans/a.json" }), "allow")
+  assert.equal(call(env, "write", { path: ".pi/plans/../x.md" }), "ask")
+  assert.equal(call(env, "write", { path: ".pi/plans-x/a.md" }), "ask")
+  assert.equal(call(env, "write", { path: "src/a.ts" }), "ask")
+  assert.equal(isPlanFile("/work", ".pi/plans"), false)
+})
+
+test("task child: verify command, git add of its files, git commit", () => {
+  const b = (command: string) => call(task, "bash", { command })
+  assert.equal(b("cargo test pkg::"), "allow")
+  assert.equal(b("cargo test pkg:: -- --nocapture"), "deny")
+  assert.equal(b("git add src/pkg.rs"), "allow")
+  assert.equal(b("git add -- src/pkg.rs tests/a.rs"), "allow")
+  assert.equal(b("git add src/pkg.rs && git commit -m 'add pkg'"), "allow")
+  assert.equal(b("git add src/other.rs"), "deny")
+  assert.equal(b("git add ."), "deny")
+  assert.equal(b("git add -A"), "deny")
+  assert.equal(b("git add src/pkg.rs ../x"), "deny")
+  assert.equal(b("git add /work/src/pkg.rs"), "allow")
+  assert.equal(b("git commit -m 'x' > /etc/x"), "deny")
+  assert.equal(b("git add src/pkg.rs | cat"), "deny")
+  assert.equal(b("git add $(echo src/pkg.rs)"), "deny")
+  assert.equal(b("git push origin task"), "deny")
+  assert.equal(b("git status"), "allow")
+  assert.equal(b("npm install"), "deny")
+  // outside a task the same commands still ask
+  assert.equal(call(env, "bash", { command: "git add src/pkg.rs" }), "ask")
+  assert.equal(call(env, "bash", { command: "cargo test pkg::" }), "ask")
+})
+
+test("task child: the commit rule and the deny rules still apply", () => {
+  const b = (command: string) => call(task, "bash", { command })
+  assert.equal(b("git commit -m 'feat: x\n\nCo-Authored-By: y'"), "deny")
+  assert.equal(b("git commit -m 'Claude wrote this'"), "deny")
+  assert.equal(b("git add src/pkg.rs; rm -rf x"), "deny")
+  assert.equal(call({ ...task, taskFiles: [".env"] }, "bash", { command: "git add .env" }), "deny")
+})
+
+test("task child: edit and write inside files, nothing asks", () => {
+  assert.equal(call(task, "write", { path: "src/pkg.rs" }), "allow")
+  assert.equal(call(task, "edit", { path: "/work/tests/a.rs" }), "allow")
+  assert.equal(call(task, "write", { path: "src/other.rs" }), "deny")
+  assert.equal(call(task, "write", { path: "/work2/src/pkg.rs" }), "deny")
+  assert.equal(call(task, "write", { path: ".pi/plans/a.md" }), "deny")
+  assert.equal(call(task, "read", { path: "/etc/hosts" }), "deny") // ask becomes deny
+  assert.equal(call(task, "read", { path: "src/other.rs" }), "allow")
+})
+
+test("taskGit", () => {
+  assert.equal(taskGit("git commit", ["a"], "/work"), true)
+  assert.equal(taskGit("", ["a"], "/work"), false)
+  assert.equal(taskGit("git add", ["a"], "/work"), false)
+  assert.equal(taskGit("git -C x commit", ["a"], "/work"), false)
+  assert.equal(taskGit("FOO=1 git commit", ["a"], "/work"), false)
 })
