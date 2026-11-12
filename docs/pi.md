@@ -11,8 +11,9 @@ modules/tools/pi/
 │   ├── .local/bin/pi                 # the wrapper: sets the environment, runs the install
 │   └── .pi/agent/
 │       ├── models.json               # ollama
+│       ├── tasks.json                # the model tiers of the tasks extension
 │       ├── extensions/guardrails/    # allow, ask and deny rules; rules.json holds them
-│       ├── extensions/{lsp,memory,btw,simplify,models-discovery,budget}/
+│       ├── extensions/{lsp,memory,btw,simplify,models-discovery,budget,tasks}/
 │       └── AGENTS.md -> ../../../../agents-common/home/.config/agents/AGENTS.md
 ├── merge/.pi/agent/settings.json     # only the keys this repository owns
 └── emit/pi/                          # the theme, and its fallback
@@ -160,6 +161,85 @@ Lists the models of an OpenAI-compatible server at start-up and registers them w
 ### budget
 
 Caps spend per session. It adds up cost and tokens (`input + output`) from each assistant message's usage, which is the cost Pi shows in its footer. It warns once at 25, 50 and 75% of the nearer cap. At 100% it blocks every further tool call with a reason telling the model to report and stop. Set `PI_BUDGET_USD` (default 2) and `PI_BUDGET_TOKENS` (default 5000000); 0 disables a cap. A model with no catalog price, such as the Claude bridge on a subscription, records a cost of 0, so only the token cap applies to it. There is no cap on output tokens per request; use `maxTokens` in models.json. Totals reset when the session starts, resumes or forks.
+
+## Tasks
+
+The `tasks` extension plans before it builds. This half covers planning and review, and the small
+change; a task tree that runs in worktrees comes next, as `/tasks run`.
+
+### Tiers
+
+`~/.pi/agent/tasks.json` names three models as `provider/model` and a concurrency for the task runner.
+Pi never rewrites the file, so it is a link and not part of `settings.json`:
+
+```json
+{ "plan": "claude-bridge/claude-opus-5-5", "large": "claude-bridge/claude-sonnet-5-5",
+  "small": "claude-bridge/claude-haiku-5-5", "maxConcurrent": 3 }
+```
+
+The defaults are the newest Opus, Sonnet and Haiku of the Claude bridge. Any provider works, an
+ollama model for `small` included.
+
+### Planning
+
+`/plan <request>` switches to the `plan` model and tells it that it is planning. The session is then
+read-only: `edit` and `write` are refused outside `.pi/plans/`, and `bash` runs only what guardrails
+allow without asking. An `ask` verdict counts as a refusal here, since the model has nobody to ask.
+Other tools (memory, MCP, codemode) are refused too. The model asks you with `ask_user_question`,
+researches with `read`, `grep`, `find`, `ls` and `scout`, and writes `.pi/plans/<slug>.md`.
+Guardrails still ask before each `edit` or `write`, plan file included.
+
+`scout` takes up to 6 questions and runs one child `pi` per question, in parallel, on the `small`
+model: print mode, `--no-session`, only `read`, `grep`, `find`, `ls`, no MCP, and `-na`, so a
+project's own extensions and settings are not loaded. Each has 180 seconds and its answer is cut at
+8000 characters; a failed scout reports its error. The child is the `pi` on PATH, the wrapper, so it
+stays offline.
+
+`/plan cancel` leaves plan mode without approving. Leaving restores the model you were using. Plan mode
+survives a resume.
+
+### The plan file
+
+```markdown
+---
+status: draft
+---
+# <title>
+
+## Goal
+## Decisions
+## Open questions
+
+## Tasks
+### 3.1 dnf backend
+- deps: 2
+- files: src/pkg.rs
+- tier: small
+- verify: cargo test pkg::
+- accept: dnf installs the listed packages
+```
+
+`status` is `draft` or `approved`. A task is `### <id> <title>` plus `deps`, `files` (comma separated),
+`tier` (`small` or `large`), `verify`, `accept` and an optional `parent` (an id like `3.1` has parent `3`
+unless set). All but `deps` and `parent` are required; ids are unique and `deps` must exist. These are the
+fields of the task JSON in the plan-modules workflow. A plan with one task, or no `## Tasks`, is a small change.
+
+### Review
+
+`/plan review` opens the plan in your editor (`externalEditor` in the settings, else `$VISUAL`, `$EDITOR`)
+and hands the terminal over until it exits, as Pi's own `ctrl+g` does. A comment is a line starting with
+`>>` under the lines it is about, which are quoted with `>`. On save, each comment goes to the model with
+its quoted lines, and the model revises the plan and deletes the quotes. Run `/plan review` again for
+the next round. Without comments it says so.
+
+In nvim, select lines in a plan under `.pi/plans/` and press `,c`: they become a `>` quote with a `>> `
+line under them, in insert mode.
+
+### Approval
+
+`/plan approve` checks that the plan parses, sets `status: approved`, leaves plan mode and restores the
+model. A small plan is then implemented in the same session. A plan with several tasks stays approved
+for `/tasks run`, which does not exist yet.
 
 ## Theme
 
