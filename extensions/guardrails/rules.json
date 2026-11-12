@@ -2,8 +2,7 @@
   "tools": {
     "*": "allow",
     "edit": "ask",
-    "write": "ask",
-    "powershell": "deny"
+    "write": "ask"
   },
   "bash": {
     "*": "ask",

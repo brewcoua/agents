@@ -121,7 +121,6 @@ test("paths", () => {
 test("tool verdicts", () => {
   assert.equal(toolVerdict(rules, "read"), "allow")
   assert.equal(toolVerdict(rules, "edit"), "ask")
-  assert.equal(toolVerdict(rules, "powershell"), "deny")
   assert.equal(toolVerdict(rules, "mcp_thing"), "allow")
 })
 

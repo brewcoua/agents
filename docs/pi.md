@@ -96,7 +96,7 @@ command (`ls *` allows `ls`).
 
 | Table | Decides |
 |---|---|
-| `tools` | a tool by name: `edit` and `write` ask, `powershell` is denied, the rest allowed |
+| `tools` | a tool by name: `edit` and `write` ask, the rest allowed |
 | `bash` | each simple command, as its words joined by spaces |
 | `bashRegex` | destructive commands: forced recursive delete, force-push, push to `master`/`main`/`release/`, `dd of=`, `DROP TABLE` |
 | `interpreters`, `opaque` | a pipe into a shell or interpreter is denied; `eval`, `exec`, `source`, `.` and `sh -c` ask |
