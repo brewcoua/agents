@@ -12,6 +12,7 @@ modules/tools/pi/
 │   └── .pi/agent/
 │       ├── models.json               # ollama
 │       ├── extensions/guardrails/    # allow, ask and deny rules; rules.json holds them
+│       ├── extensions/{lsp,memory,btw,simplify,models-discovery,budget}/
 │       └── AGENTS.md -> ../../../../agents-common/home/.config/agents/AGENTS.md
 ├── merge/.pi/agent/settings.json     # only the keys this repository owns
 └── emit/pi/                          # the theme, and its fallback
@@ -75,15 +76,15 @@ merge.
 |---|---|
 | Claude | `claude auth login`, then `/model` and a `claude-bridge` model. Through the bridge Pi executes the tools; the Claude Code child sees the hooks in `~/.claude/settings.json`, which stays lean for that reason |
 | Codex, Gemini | Pi's own `/login` |
-| ollama | `models.json`: `openai-completions` at `http://localhost:11434/v1`. It lists no model; add `models` entries with the ids `ollama list` shows |
+| ollama | `models.json`: `openai-completions` at `http://localhost:11434/v1`. It lists no model; the models-discovery extension registers what the server has |
 
 `~/.pi/agent/AGENTS.md` is a link to the file `agents-common` shares with opencode and Claude Code,
 so the rules, the commit rule included, apply to Pi. Pi reads `~/.agents/skills` and
 `~/.pi/agent/skills`, not `~/.claude/skills`; the `skills` setting above is what brings the shared
 skills in, with no copy.
 
-Pi has no subagents, plan mode or web access of its own, and no permission prompts: the
-guardrails extension adds them. MCP servers go in
+Pi has no subagents, plan mode or web access of its own, and no permission prompts; the
+guardrails extension adds those. MCP servers go in
 `~/.pi/agent/mcp.json`, which Pi also rewrites from `/mcp`, so the module does not ship one.
 
 ## Guardrails
@@ -125,6 +126,40 @@ Bash is not confined by it.
 
 The pure logic (`rules.ts`, no Pi imports) is tested by `modules/tools/pi/test/`, which
 `.ci/check.sh` runs with `node --test`.
+
+## Extensions
+
+The other extensions in `~/.pi/agent/extensions/`, each with its pure logic tested the same way.
+
+### lsp
+
+After a successful `edit` or `write`, appends the file's errors (and up to 5 warnings) from a language server: rust-analyzer, lua-language-server, pyright (or basedpyright), typescript-language-server, gopls, clangd or bash-language-server. It uses only servers already on PATH and never installs one. One server process runs per workspace root, started on first use and stopped when the session ends. If a cold server does not answer within 10 seconds (`OTHALA_LSP_TIMEOUT_MS`), the result says "no diagnostics yet". Diagnostics are the ones servers push; a server that only answers pull requests gives none.
+
+### memory
+
+Markdown memory that survives sessions, kept the way Claude Code keeps its own: one fact per file, plus an index.
+
+- Global memories are in `~/.pi/agent/memory/`, project memories in `<project>/.pi/memory/`. Commit the project directory or ignore it, as you prefer; the global ignore does not list it.
+- Each memory is `<name>.md` with frontmatter (`name`, `description`, `type`: user, feedback, project or reference) and a body. `MEMORY.md` in the same directory holds one line per memory.
+- Tools: `memory_save` (create, or replace the memory of the same name) and `memory_forget`.
+- Each request carries the two `MEMORY.md` indexes as a leading user message, never stored in the session. The model reads a memory file with `read` when its line matters.
+- Pi offers no hook to add a turn to a compaction. So when a run ends with the context at 80% or more, the extension asks the model once, in a hidden message, to save what is worth keeping. It makes no model call of its own, and does nothing on exit. A manual `/compact` gets no such reminder.
+
+### btw
+
+`/btw <question>`, or `ctrl+alt+b`, asks a quick question in a separate, read-only session while the main agent keeps running. The side session runs in-process (the SDK's `createAgentSession`, an in-memory session) on the main session's current model, with only `read`, `grep`, `find` and `ls`. It loads only the guardrails extension, so the same path rules apply; what guardrails would ask about is refused, since the side session has no UI. It sees the last 20000 characters of the main conversation's text. The answer streams into an overlay; Esc closes it. The exchange is never added to the main session's history or saved to a file. It needs the interactive TUI.
+
+### simplify
+
+`/simplify [ref]` runs `git diff` in the session directory (against `HEAD`, so staged and unstaged changes, or against `ref`) and asks the model to apply the `simplify` skill to it. An empty diff prints a notice and sends nothing. A diff over 60000 characters is cut at file boundaries, and the message names the files left out. Untracked files are not in `git diff`. The skill lives in agents-common (`~/.claude/skills/simplify`), so Claude Code and opencode have it too; it lists cuts and applies none unless asked.
+
+### models-discovery
+
+Lists the models of an OpenAI-compatible server at start-up and registers them with Pi. A provider in `~/.pi/agent/models.json` opts in with `"modelsDiscovery": true`, a key Pi itself ignores; the module's ollama provider does. It calls `GET <baseUrl>/models`, then ollama's `POST /api/show` on the same host for each model, for the context length and the vision and thinking capabilities. Models listed in models.json win over discovered ones. It talks only to the configured host, with a 3 second timeout. With the host down, nothing is added and nothing is printed; `OTHALA_DEBUG=1` says why.
+
+### budget
+
+Caps spend per session. It adds up cost and tokens (`input + output`) from each assistant message's usage, which is the cost Pi shows in its footer. It warns once at 25, 50 and 75% of the nearer cap. At 100% it blocks every further tool call with a reason telling the model to report and stop. Set `PI_BUDGET_USD` (default 2) and `PI_BUDGET_TOKENS` (default 5000000); 0 disables a cap. A model with no catalog price, such as the Claude bridge on a subscription, records a cost of 0, so only the token cap applies to it. There is no cap on output tokens per request; use `maxTokens` in models.json. Totals reset when the session starts, resumes or forks.
 
 ## Theme
 
