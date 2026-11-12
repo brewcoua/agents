@@ -117,3 +117,11 @@ After two failed attempts on the same region, change strategy fundamentally or a
 ## 10. Delegate the reading
 
 Hand search-heavy and read-heavy work to subagents so their raw reading stays out of this context: `locate` to find code, `scout` for one external question, `review` to audit a diff, `research` for a broad question needing several perspectives.
+
+## 11. Commit messages
+
+NEVER add a `Co-Authored-By` line or a "Generated with" line.
+NEVER mention Claude, Pi, or AI in a commit message.
+
+- BAD: `fix: retry on 503` followed by `Co-Authored-By: Claude <noreply@anthropic.com>`
+- GOOD: `fix: retry on 503`

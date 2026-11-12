@@ -1,22 +1,25 @@
 # Coding agents
 
-Two modules under `modules/tools/` configure two coding agents. `agents` holds opencode's
-configuration and what the two tools share, a rules file and four skills. `claude` installs Claude
-Code and holds its settings and subagents; it requires `agents`. Each shared file exists once in the
-repository.
+Three modules under `modules/tools/` configure two coding agents. `agents-common` holds what the two
+tools share, a rules file and four skills. `opencode` holds opencode's configuration. `claude`
+installs Claude Code and holds its settings and subagents. Both tool modules require `agents-common`.
+Each shared file exists once in the repository.
 
 ```
-modules/tools/agents/home/
-├── .config/opencode/
-│   ├── opencode.json          # provider, models, permissions, the build and plan agents
-│   ├── AGENTS.md              # the working rules, for both tools
-│   ├── prompts/               # system, orchestrator, plan, build
-│   ├── agent/                 # locate, scout, review, research, implement, refactor
-│   ├── plugin/                # guardrails, budget, docs-first, tool-descriptions, models-discovery
-│   └── skills/docs-lookup/    # opencode only
+modules/tools/agents-common/home/
+├── .config/
+│   ├── agents/AGENTS.md       # the working rules, for both tools
+│   └── opencode/AGENTS.md -> ../agents/AGENTS.md
 └── .claude/
-    ├── CLAUDE.md -> ../.config/opencode/AGENTS.md
+    ├── CLAUDE.md -> ../.config/agents/AGENTS.md
     └── skills/                # grill, handoff, docs-writing, terse-output: both tools
+
+modules/tools/opencode/home/.config/opencode/
+├── opencode.json              # provider, permissions, the build and plan agents
+├── prompts/                   # system, orchestrator, plan, build
+├── agent/                     # locate, scout, review, research, implement, refactor
+├── plugin/                    # guardrails, budget, docs-first, tool-descriptions, models-discovery
+└── skills/docs-lookup/        # opencode only
 
 modules/tools/claude/home/.claude/
 ├── settings.json
@@ -37,9 +40,11 @@ previous one. `othala module show claude` prints the method and the fingerprint.
 link of its own. Put a skill there to share it, or under `.config/opencode/skills/` to keep it
 opencode's alone. A name must not exist in both places. opencode does not say which copy wins.
 
-**Rules.** `CLAUDE.md` is a symlink committed to git, pointing at `AGENTS.md`. `othala link`
-links a symlink inside a package the way it links a file, so `~/.claude/CLAUDE.md` resolves
-through the repository to the one rules file. The text names the subagents `locate`, `scout`,
+**Rules.** The rules file is `~/.config/agents/AGENTS.md`. `~/.config/opencode/AGENTS.md` and
+`~/.claude/CLAUDE.md` are symlinks committed to git, pointing at it. `othala link` links a symlink
+inside a package the way it links a file, so both resolve through the repository to the one rules
+file. The file also carries the commit rule: no `Co-Authored-By`, no "Generated with", no mention of
+Claude, Pi or AI in a commit message. The text names the subagents `locate`, `scout`,
 `review` and `research`, and both tools have all four.
 
 **Subagents are the exception.** The two tools disagree on frontmatter (models, permissions,
@@ -47,11 +52,11 @@ tool lists), and a Claude Code subagent cannot start another subagent. So `.clau
 copies of the bodies, edited only where an opencode agent delegates: `research` searches
 itself instead of dispatching scouts, and `implement` drops the orchestrator prompt. Each copy
 starts with a comment saying so. Change both copies together; they now sit in different modules,
-opencode's in `agents` and Claude Code's in `claude`.
+opencode's in `opencode` and Claude Code's in `claude`.
 
 ## Claude Code settings
 
-`settings.json` (in the `claude` module) holds the model, plugins, `env` and `permissions`. `env`
+`settings.json` (in the `claude` module) holds the model, `env` and `permissions`. `env`
 sets `DISABLE_AUTOUPDATER` to `1`: `othala update` is what updates Claude Code, through the same
 signed-release recipe, and Claude Code's own updater would replace the binary without that check. The permissions
 translate `opencode.json`'s bash rules: read-only commands and git queries are allowed, history
@@ -64,9 +69,15 @@ to `Read`. Two rules have no equivalent:
 - The `Read` deny does not stop `cat .env` through `Bash`. That needs a hook, which is what
   `guardrails.js` is on the opencode side.
 
-Claude Code writes `settings.json` itself, for example from `/config` or when a plugin is
-installed. Those writes go through the link into the repository and show up in `git diff`.
+Claude Code installs no plugin or marketplace, and `attribution` is empty for commits and pull
+requests. It writes `settings.json` itself, for example from `/config`. Those writes go through the link into the repository and show up in `git diff`.
 Commit them or revert them.
+
+## Providers
+
+`opencode.json` still defines the `futhark` provider, but lists it in `disabled_providers` and sets
+no `model` or `small_model`, so no agent defaults to the gateway. The subagents and the `build` and
+`plan` agents name no model either; opencode picks the one selected in the session.
 
 ## Environment
 
@@ -74,6 +85,6 @@ Commit them or revert them.
 gateway allows three concurrent requests, and background fan-out stacks requests past that limit
 until they time out.
 
-opencode is in the `agents` module's `install` recipes: from the Arch repositories, and on Fedora
+opencode is in the `opencode` module's `install` recipes: from the Arch repositories, and on Fedora
 from npm (`opencode-ai`, with `nodejs-npm` from dnf). Claude Code is the `claude` module's `release` recipe, not the AUR's `claude-code`. A machine that still
 has that package installed keeps it, since `othala sync` never removes anything.
