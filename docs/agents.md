@@ -1,7 +1,9 @@
 # Coding agents
 
-The `agents` module (`modules/tools/agents/`) configures two coding agents, opencode and Claude Code, from one `home/`. The two
-share a rules file and four skills. Each file exists once in the repository.
+Two modules under `modules/tools/` configure two coding agents. `agents` holds opencode's
+configuration and what the two tools share, a rules file and four skills. `claude` installs Claude
+Code and holds its settings and subagents; it requires `agents`. Each shared file exists once in the
+repository.
 
 ```
 modules/tools/agents/home/
@@ -14,10 +16,19 @@ modules/tools/agents/home/
 │   └── skills/docs-lookup/    # opencode only
 └── .claude/
     ├── CLAUDE.md -> ../.config/opencode/AGENTS.md
-    ├── settings.json
-    ├── agents/                # the same six subagents, for Claude Code
     └── skills/                # grill, handoff, docs-writing, terse-output: both tools
+
+modules/tools/claude/home/.claude/
+├── settings.json
+└── agents/                    # the same six subagents, for Claude Code
 ```
+
+Claude Code is not a package. The `claude` module's `release` recipe downloads Anthropic's own
+build, on Arch and Fedora alike, and checks its sha256 against a manifest that Anthropic signs; the
+module pins the signing key's fingerprint, and gpg verifies in a temporary keyring, so yours is
+never touched. The binary lands in `~/.local/share/claude/versions/<version>` and `~/.local/bin/claude`
+points at it. Nothing is pinned to a version: `othala update` installs the latest and removes the
+previous one. `othala module show claude` prints the method and the fingerprint.
 
 ## Sharing without copies
 
@@ -35,11 +46,14 @@ through the repository to the one rules file. The text names the subagents `loca
 tool lists), and a Claude Code subagent cannot start another subagent. So `.claude/agents/` holds
 copies of the bodies, edited only where an opencode agent delegates: `research` searches
 itself instead of dispatching scouts, and `implement` drops the orchestrator prompt. Each copy
-starts with a comment saying so. Change both copies together.
+starts with a comment saying so. Change both copies together; they now sit in different modules,
+opencode's in `agents` and Claude Code's in `claude`.
 
 ## Claude Code settings
 
-`settings.json` holds the model, plugins, the `rtk` hook and `permissions`. The permissions
+`settings.json` (in the `claude` module) holds the model, plugins, `env` and `permissions`. `env`
+sets `DISABLE_AUTOUPDATER` to `1`: `othala update` is what updates Claude Code, through the same
+signed-release recipe, and Claude Code's own updater would replace the binary without that check. The permissions
 translate `opencode.json`'s bash rules: read-only commands and git queries are allowed, history
 rewrites and pushes ask, and `rm -rf`, `sudo`, `git reset --hard` and the like are denied. Files
 that `guardrails.js` treats as secrets (`.env`, keys, certificates, SSH identities) are denied
@@ -60,5 +74,6 @@ Commit them or revert them.
 gateway allows three concurrent requests, and background fan-out stacks requests past that limit
 until they time out.
 
-Both programs are in the `agents` module's `install` recipe: `opencode` from the repositories and
-`claude-code` from the AUR.
+opencode is in the `agents` module's `install` recipes: from the Arch repositories, and on Fedora
+from npm (`opencode-ai`, with `nodejs-npm` from dnf). Claude Code is the `claude` module's `release` recipe, not the AUR's `claude-code`. A machine that still
+has that package installed keeps it, since `othala sync` never removes anything.
