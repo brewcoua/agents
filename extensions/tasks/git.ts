@@ -63,7 +63,7 @@ function sh(cwd: string, command: string, args: string[], env: NodeJS.ProcessEnv
 export const worktreeDir = (cwd: string, t: RunTask) => join(cwd, WORKTREES_DIR, safeId(t.id))
 const branch = (t: RunTask) => `pi-task-${safeId(t.id)}`
 
-// The agent a task runs as; its role is the task's tier, its prompt childPrompt (run.ts).
+// The agent a task runs as; its role is the task's, its prompt childPrompt (run.ts).
 const TASK: Def = {
   name: "task",
   description: "One task of an approved plan, in its own worktree",
@@ -120,9 +120,9 @@ export function gitIO(cwd: string, spawner: Spawner, save: IO["save"], log: IO["
       // -B: a branch left by a worktree the user discarded is reused
       await git(cwd, "worktree", "add", dir, "-B", branch(t), base(t))
     },
-    async child(t, tier, prompt) {
+    async child(t, role, prompt) {
       const a = spawner.spawn({
-        owner: "tasks", def: { ...TASK, role: tier }, prompt, description: `${t.id} ${t.title}`, cwd: worktreeDir(cwd, t),
+        owner: "tasks", def: { ...TASK, role }, prompt, description: `${t.id} ${t.title}`, cwd: worktreeDir(cwd, t),
         tools: [requestFiles(t)], guard: { taskFiles: t.files, taskVerify: t.verify },
         env: { ...sccache, OTHALA_TASK_TREE: tree(t) }, timeoutMs: CHILD_TIMEOUT_MS,
       })

@@ -211,9 +211,9 @@ provider's real errors yet.
 The `tasks` extension plans before it builds, then runs the plan's tasks in git worktrees, each as an
 agent ([Agents](#agents)), so the fleet shows them. Planning and review come first; a small change is implemented in the same session.
 
-### Tiers
+### Roles
 
-A task's `tier` (`small` or `large`) is a role of the active profile ([Profiles](#profiles)), and
+A task's `role` (`small` or `large`) is a role of the active profile ([Profiles](#profiles)), and
 `/plan` uses `top`. At most `maxConcurrent` of `profiles.json` tasks run at once.
 
 ### Planning
@@ -243,19 +243,41 @@ status: draft
 ## Decisions
 ## Open questions
 
+## Acceptance
+- a1: `cargo test --test dnf` exits 0
+- a2: manual: `othala --help` names dnf
+- a3: deferred: no Fedora CI yet
+
 ## Tasks
 ### 3.1 dnf backend
 - deps: 2
-- files: src/pkg.rs
-- tier: small
+- files: src/pkg.rs, tests/dnf.rs
+- tests: tests/dnf.rs
+- role: small
+- mode: tdd
+- spec: dnf installs the listed packages; an empty list runs nothing
 - verify: cargo test pkg::
-- accept: dnf installs the listed packages
+- covers: a1, a2
 ```
 
-`status` is `draft` or `approved`. A task is `### <id> <title>` plus `deps`, `files` (comma separated),
-`tier` (`small` or `large`), `verify`, `accept` and an optional `parent` (an id like `3.1` has parent `3`
-unless set). All but `deps` and `parent` are required; ids are unique and `deps` must exist. These are the
-fields of the task JSON in the plan-modules workflow. A plan with one task, or no `## Tasks`, is a small change.
+`status` is `draft` or `approved`. An acceptance item is `` `<command>` exits 0 ``, `manual: <check>`,
+or `deferred: <reason>`. A task is `### <id> <title>` plus:
+
+| Field | Value |
+|---|---|
+| `deps` | ids of tasks that land first, comma separated |
+| `files` | paths or globs the task may change, comma separated |
+| `tests` | the subset of `files` holding the task's tests; required for `tdd` |
+| `role` | `small` or `large` |
+| `mode` | `tdd`, or `direct: <reason>` for work no test can describe |
+| `spec` | the behaviours the tests must show, in words |
+| `verify` | one command that fails until the task is done |
+| `covers` | the acceptance ids the task makes pass |
+| `parent` | an id like `3.1` has parent `3` unless set |
+
+`files`, `role`, `mode`, `spec` and `verify` are required; ids are unique and `deps` must exist. When the
+plan has tasks, every acceptance item that is not deferred is covered by one, and `covers` names only
+acceptance items. A plan with one task, or no `## Tasks`, is a small change.
 
 ### Review
 
@@ -286,15 +308,15 @@ line, so the session stays usable meanwhile. One run at a time per project: `.pi
 pid of the Pi running it. The plan file gains an optional `## Finish` section, one line holding the command that runs the
 project's full tests. The run goes through these steps:
 
-1. Compile. The plan becomes `.pi/plans/<slug>.json`: the plan's title, goal, decisions and finish command,
+1. Compile. The plan becomes `.pi/plans/<slug>.json`: the plan's title, goal, decisions, finish command and acceptance,
    and each task with `status` (`pending`, `running`, `review`, `done`, `failed`), and `attempts` and `notes`
    after a failure. The file is the state. Compiling refuses unknown dependencies, a cycle, and two tasks that
    are not ordered by `deps` and have overlapping `files`, naming the overlap. Two globs are taken to overlap
    unless their fixed beginnings or endings differ.
 2. Execute. A task is ready when it is pending and its dependencies are done; a batch is up to `maxConcurrent`
    ready tasks, which compiling made disjoint. Each gets `git worktree add .pi/worktrees/<id> -B pi-task-<id> HEAD`
-   (characters git dislikes in the id become `_`) and a `task` agent there on the tier's role, whose prompt
-   is the plan's goal and decisions plus the task's title, files, verify command and accept line. The agent
+   (characters git dislikes in the id become `_`) and a `task` agent there on the task's role, whose prompt
+   is the plan's goal and decisions plus the task's title, spec, mode, files, tests and verify command. The agent
    edits, runs verify, and commits in its worktree, under guardrails holding the task's files and verify
    command (see Guardrails). With `sccache` on PATH, its bash and the verify command get
    `RUSTC_WRAPPER=sccache`, so Cargo's per-worktree `target/` shares compiles; other languages need nothing.
@@ -308,7 +330,7 @@ project's full tests. The run goes through these steps:
 3. Check. No model reads the diff: the parent checks that nothing is uncommitted, that there is a commit,
    that every file in `git diff --name-only <base> HEAD` matches the task's `files`, and re-runs the verify
    command in the worktree. A failure goes back to a fresh worktree and a new agent with the failure as notes.
-   Two failures on the task's tier give a third attempt on `large`; after that the task is `failed`, the run
+   Two failures on the task's role give a third attempt on `large`; after that the task is `failed`, the run
    stops, and its worktree stays for you to look at.
 4. Land. The batch's passing tasks land one at a time: the task's branch is rebased onto the current HEAD in
    its worktree, then the current branch is fast-forwarded to it, so HEAD moves once or not at all. Then the

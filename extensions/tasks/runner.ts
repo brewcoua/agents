@@ -2,7 +2,7 @@
 // with fakes. git.ts is the IO that runs git, the task agents and the verify commands.
 
 import {
-  MAX_ATTEMPTS, MAX_REQUESTS, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, nextBatch, safeId, summary, tail, tierFor,
+  MAX_ATTEMPTS, MAX_REQUESTS, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, nextBatch, safeId, roleFor, summary, tail,
 } from "./run.ts"
 import type { Role } from "../lib/profiles.ts"
 
@@ -11,7 +11,7 @@ export type IO = {
   save(run: RunPlan): void
   log(message: string): void
   prepare(t: RunTask): Promise<void> // the task's worktree at the current HEAD, empty
-  child(t: RunTask, tier: Role, prompt: string): Promise<Output> // a task agent; code 0 when it ended well
+  child(t: RunTask, role: Role, prompt: string): Promise<Output> // a task agent; code 0 when it ended well
   request(t: RunTask): Promise<Request | undefined> // what the agent asked for with request_files, taken once
   changed(t: RunTask): Promise<{ files: string[]; uncommitted: string[] }> // against the base commit
   verify(t: RunTask): Promise<Output>
@@ -36,16 +36,16 @@ async function check(t: RunTask, io: IO, child: Output): Promise<string | undefi
 async function attempt(run: RunPlan, t: RunTask, io: IO, signal?: AbortSignal): Promise<void> {
   for (;;) {
     if (signal?.aborted) return
-    const tier = tierFor(t)
-    io.log(`task ${t.id}: attempt ${(t.attempts ?? 0) + 1} on the ${tier} tier`)
-    let child = await io.child(t, tier, childPrompt(run, t))
+    const role = roleFor(t)
+    io.log(`task ${t.id}: attempt ${(t.attempts ?? 0) + 1} on the ${role} role`)
+    let child = await io.child(t, role, childPrompt(run, t))
     // A request is answered and the child started again in the same worktree, without a reset.
     for (let req = await io.request(t); req && !signal?.aborted; req = await io.request(t)) {
       t.answer = answer(run, t, req)
       io.log(`task ${t.id} asked for ${req.files.join(", ")} (${req.reason}): ${t.answer}`)
       io.save(run)
       if ((t.requests ?? 0) > MAX_REQUESTS) break // one request too many: checked as it stands
-      child = await io.child(t, tier, childPrompt(run, t))
+      child = await io.child(t, role, childPrompt(run, t))
     }
     delete t.answer
     if (signal?.aborted) return

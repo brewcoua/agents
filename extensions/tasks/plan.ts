@@ -1,7 +1,7 @@
 // Pure logic of the tasks extension's planning half: no Pi imports, so node --test runs it.
 // The plan file format is documented in docs/25-pi.md ("Tasks"); PLAN_FORMAT below is what the model sees.
 
-import { type Decision, type Rules, checkCommand, resolve } from "../guardrails/rules.ts"
+import { type Decision, type Rules, checkCommand, glob, resolve } from "../guardrails/rules.ts"
 
 export const PLANS_DIR = ".pi/plans"
 
@@ -11,11 +11,16 @@ export type Task = {
   title: string
   deps: string[]
   files: string[]
-  tier: "large" | "small"
+  tests: string[] // the subset of files the red commit may touch
+  role: "large" | "small"
+  mode: string // "tdd", or "direct: <reason>"
+  spec: string
   verify: string
-  accept: string
+  covers: string[] // acceptance ids
 }
-export type Plan = { status: string | undefined; title: string; tasks: Task[]; errors: string[] }
+// "## Acceptance": `- a1: \`<command>\` exits 0`, `- a2: manual: <check>` or `- a3: deferred: <reason>`.
+export type Acceptance = { id: string; kind: "command" | "manual" | "deferred"; text: string }
+export type Plan = { status: string | undefined; title: string; acceptance: Acceptance[]; tasks: Task[]; errors: string[] }
 
 export function slug(text: string): string {
   const s = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48).replace(/-+$/, "")
@@ -42,6 +47,23 @@ export function withStatus(text: string, status: string): string {
 }
 
 const list = (v: string) => v.split(",").map((s) => s.trim()).filter(Boolean)
+export const sectionOf = (body: string, name: string) => new RegExp(`^## ${name}[ \\t]*$([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, "m").exec(body)?.[1].trim() ?? ""
+
+function parseAcceptance(section: string, errors: string[]): Acceptance[] {
+  const items: Acceptance[] = []
+  for (const line of section.split("\n")) {
+    const m = /^- ([\w.-]+):\s*(.*)$/.exec(line.trim())
+    if (!m) continue
+    const [, id, rest] = m
+    const command = /^`(.+)`\s+exits 0$/.exec(rest)
+    const other = /^(manual|deferred):\s*(\S.*)$/.exec(rest)
+    if (items.some((a) => a.id === id)) errors.push(`acceptance id ${id} is used twice`)
+    if (command) items.push({ id, kind: "command", text: command[1] })
+    else if (other) items.push({ id, kind: other[1] as Acceptance["kind"], text: other[2] })
+    else errors.push(`acceptance ${id}: not "\`<command>\` exits 0", "manual: <check>" or "deferred: <reason>"`)
+  }
+  return items
+}
 
 export function parsePlan(text: string): Plan {
   const errors: string[] = []
@@ -49,31 +71,40 @@ export function parsePlan(text: string): Plan {
   const title = /^# (.+)$/m.exec(body)?.[1].trim() ?? ""
   if (!title) errors.push("no `# Title` line")
 
+  const acceptance = parseAcceptance(sectionOf(body, "Acceptance"), errors)
   const tasks: Task[] = []
-  const section = /^## Tasks[ \t]*$([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(body)?.[1]
-  const blocks = section ? section.split(/^### /m).slice(1) : []
+  const blocks = sectionOf(body, "Tasks").split(/^### /m).slice(1)
   for (const block of blocks) {
     const [head, ...lines] = block.split("\n")
     const [id, ...words] = head.trim().split(/\s+/)
     const f: Record<string, string> = {}
     for (const line of lines) {
-      const m = /^- (parent|deps|files|tier|verify|accept):\s*(.*)$/.exec(line)
+      const m = /^- (parent|deps|files|tests|role|mode|spec|verify|covers):\s*(.*)$/.exec(line)
       if (m) f[m[1]] = m[2].trim()
     }
-    const missing = ["files", "tier", "verify", "accept"].filter((k) => !f[k])
+    const missing = ["files", "role", "mode", "spec", "verify"].filter((k) => !f[k])
     if (!id || words.length === 0) errors.push(`task heading "${head.trim()}" is not "### <id> <title>"`)
     if (missing.length) errors.push(`task ${id}: missing ${missing.join(", ")}`)
-    if (f.tier && f.tier !== "large" && f.tier !== "small") errors.push(`task ${id}: tier must be large or small`)
+    if (f.role && f.role !== "large" && f.role !== "small") errors.push(`task ${id}: role must be large or small`)
+    if (f.mode && f.mode !== "tdd" && !/^direct:\s*\S/.test(f.mode)) errors.push(`task ${id}: mode must be tdd, or direct: <reason>`)
+    const files = list(f.files ?? "")
+    const tests = list(f.tests ?? "")
+    if (f.mode === "tdd" && !tests.length) errors.push(`task ${id}: a tdd task needs tests`)
+    const stray = tests.filter((x) => !files.some((g) => glob(g, x)))
+    if (stray.length) errors.push(`task ${id}: tests ${stray.join(", ")} not in its files`)
     const parent = f.parent || (id?.includes(".") ? id.slice(0, id.lastIndexOf(".")) : "")
     tasks.push({
       id,
       ...(parent ? { parent } : {}),
       title: words.join(" "),
       deps: list(f.deps ?? ""),
-      files: list(f.files ?? ""),
-      tier: f.tier as Task["tier"],
+      files,
+      tests,
+      role: f.role as Task["role"],
+      mode: f.mode ?? "",
+      spec: f.spec ?? "",
       verify: f.verify ?? "",
-      accept: f.accept ?? "",
+      covers: list(f.covers ?? ""),
     })
   }
 
@@ -85,8 +116,13 @@ export function parsePlan(text: string): Plan {
   for (const t of tasks) {
     for (const d of t.deps) if (d === t.id || !ids.has(d)) errors.push(`task ${t.id}: unknown dependency ${d}`)
     if (t.parent && !ids.has(t.parent)) errors.push(`task ${t.id}: unknown parent ${t.parent}`)
+    for (const c of t.covers) if (!acceptance.some((a) => a.id === c)) errors.push(`task ${t.id}: covers ${c}, which is no acceptance item`)
   }
-  return { status: planStatus(text), title, tasks, errors }
+  // With no tasks the session implements the plan itself, and nothing is there to cover.
+  for (const a of tasks.length ? acceptance : []) {
+    if (a.kind !== "deferred" && !tasks.some((t) => t.covers.includes(a.id))) errors.push(`acceptance ${a.id} is covered by no task; cover it, or make it deferred: <reason>`)
+  }
+  return { status: planStatus(text), title, acceptance, tasks, errors }
 }
 
 // One task or none: the session implements it itself, with no task tree.
@@ -155,16 +191,26 @@ status: draft
 ## Open questions
 - <only what the user must still decide; none is fine>
 
+## Acceptance
+- a1: \`<a read-only command that measures the outcome>\` exits 0
+- a2: manual: <a check no command can make>
+- a3: deferred: <an outcome this plan leaves out, and why>
+
 ## Tasks
 ### 1 <title>
 - deps: <ids, comma separated; omit if none>
 - files: <paths or globs this task may touch, comma separated>
-- tier: <small or large>
+- tests: <the subset of files that holds this task's tests>
+- role: <small or large>
+- mode: <tdd, or direct: <why no test can describe it>>
+- spec: <the behaviours the tests must show, in words>
 - verify: <one command that fails until the task is done>
-- accept: <one sentence a reviewer can check>
+- covers: <the acceptance ids this task makes pass, comma separated; omit if none>
 
 Ids are strings ("1", "2", "2.1"); "2.1" is a subtask of "2" unless a \`- parent:\` line says otherwise.
-Tasks whose files overlap must depend on each other. Tier small is for mechanical, well-specified work, large for the rest.
+Tasks whose files overlap must depend on each other. Role small is for mechanical, well-specified work, large for the rest.
+Every acceptance item is covered by a task or deferred. A tdd task writes its tests first and needs tests; direct is for
+work no test can describe (documentation, configuration). No implementation code in the plan.
 A small change is one task (or no Tasks section).
 
 ## Finish

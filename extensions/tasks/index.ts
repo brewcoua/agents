@@ -151,6 +151,8 @@ export default function (pi: ExtensionAPI) {
       return undefined
     }
   }
+  // Task files compiled before plans had acceptance and modes.
+  const oldFormat = (run: RunPlan) => run.acceptance ? undefined : `${PLANS_DIR}/${run.slug}.json comes from the plan format with tier and accept. Rewrite the plan with role, mode and spec, delete the .json, and run it again.`
   const saveRun = (ctx: ExtensionCommandContext) => (run: RunPlan) => writeFileSync(jsonPath(ctx, run.slug), `${JSON.stringify(run, null, 2)}\n`)
 
   // Plans not finished: an approved plan, or a task tree that has not reached done.
@@ -194,6 +196,8 @@ export default function (pi: ExtensionAPI) {
       if (!c.run) return ctx.ui.notify(`${name} cannot run:\n- ${c.errors.join("\n- ")}`, "error")
       run = c.run
     }
+    const old = oldFormat(run)
+    if (old) return ctx.ui.notify(old, "error")
     if (run.status === "done") return ctx.ui.notify(`${name} is already done.`, "info")
     const spawner = agents()
     if (!spawner) return ctx.ui.notify("/tasks runs each task as an agent, and the agents extension is not loaded.", "error")
@@ -271,7 +275,10 @@ export default function (pi: ExtensionAPI) {
 
   // The live view of a plan's tasks, read from its task file once a second.
   async function view(name: string, ctx: ExtensionCommandContext) {
-    if (!loadRun(ctx, name)) return ctx.ui.notify(`${name} has not been compiled yet. /tasks run ${name} does it.`, "info")
+    const first = loadRun(ctx, name)
+    if (!first) return ctx.ui.notify(`${name} has not been compiled yet. /tasks run ${name} does it.`, "info")
+    const old = oldFormat(first)
+    if (old) return ctx.ui.notify(old, "error")
     let tasks: RunTask[] = []
     await showList(ctx, {
       title: `Tasks: ${name}`,
@@ -286,10 +293,12 @@ export default function (pi: ExtensionAPI) {
           detail: () =>
             [
               `${t.id} ${t.title}: ${t.status}`,
-              `tier ${t.tier}, deps ${t.deps.join(", ") || "none"}`,
+              `role ${t.role}, mode ${t.mode}, deps ${t.deps.join(", ") || "none"}`,
               `files ${t.files.join(", ")}`,
+              ...(t.tests.length ? [`tests ${t.tests.join(", ")}`] : []),
               `verify ${t.verify}`,
-              `accept ${t.accept}`,
+              `spec ${t.spec}`,
+              ...(t.covers.length ? [`covers ${t.covers.join(", ")}`] : []),
               ...(t.granted?.length ? ["", "granted:", ...t.granted.map((g) => `- ${g.files.join(", ")}: ${g.reason}`)] : []),
               ...(t.notes ? ["", "notes:", t.notes] : []),
             ].join("\n"),

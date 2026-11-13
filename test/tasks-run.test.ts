@@ -3,14 +3,15 @@ import { test } from "node:test"
 import { parsePlan } from "../extensions/tasks/plan.ts"
 import {
   type RunPlan, type RunTask, answer, childPrompt, compile, filesOutside, finishCommand, nextBatch,
-  overlap, safeId, start, tierFor, validate,
+  overlap, roleFor, safeId, start, validate,
 } from "../extensions/tasks/run.ts"
 import { type IO, runPlan } from "../extensions/tasks/runner.ts"
 
 const task = (id: string, o: Partial<RunTask> = {}): RunTask => ({
-  id, title: `t${id}`, deps: [], files: [`${id}.txt`], tier: "small", verify: `v${id}`, accept: "ok", status: "pending", ...o,
+  id, title: `t${id}`, deps: [], files: [`${id}.txt`], tests: [], role: "small", mode: "direct: x",
+  spec: "ok", verify: `v${id}`, covers: [], status: "pending", ...o,
 })
-const plan = (...tasks: RunTask[]): RunPlan => ({ slug: "p", title: "P", goal: "g", decisions: "- d", status: "running", tasks })
+const plan = (...tasks: RunTask[]): RunPlan => ({ slug: "p", title: "P", goal: "g", decisions: "- d", acceptance: [], status: "running", tasks })
 
 test("overlap: literals, globs, and the conservative case", () => {
   assert.equal(overlap("src/a.rs", "src/a.rs"), true)
@@ -53,15 +54,17 @@ Install things.
 ## Tasks
 ### 1 first
 - files: a.txt
-- tier: small
+- role: small
+- mode: direct: x
+- spec: a
 - verify: true
-- accept: a
 ### 2 second
 - deps: 1
 - files: a.txt
-- tier: large
+- role: large
+- mode: direct: x
+- spec: b
 - verify: true
-- accept: b
 
 ## Finish
 \`make test\`
@@ -95,8 +98,8 @@ test("start: interrupted and failed tasks go back to pending", () => {
   assert.equal(r.tasks[2].attempts, undefined)
 })
 
-test("tier: two failures on the task's tier, then large", () => {
-  assert.deepEqual([0, 1, 2].map((attempts) => tierFor(task("1", { attempts }))), ["small", "small", "large"])
+test("role: two failures on the task's role, then large", () => {
+  assert.deepEqual([0, 1, 2].map((attempts) => roleFor(task("1", { attempts }))), ["small", "small", "large"])
 })
 
 test("files check", () => {
@@ -132,9 +135,9 @@ function fake(script: Record<string, Attempt[]>, landError: Record<string, strin
     save: (r) => saved.push(r.tasks.map((t) => t.status[0]).join("")),
     log: () => {},
     prepare: async (t) => void calls.push(`prepare ${t.id}`),
-    child: async (t, tier) => {
+    child: async (t, role) => {
       used[t.id] = (used[t.id] ?? 0) + 1
-      calls.push(`child ${t.id} ${tier}`)
+      calls.push(`child ${t.id} ${role}`)
       return { code: 0, output: "" }
     },
     request: async (t) => {
@@ -180,7 +183,7 @@ test("run: a diff outside files is refused, retried with notes, escalated, then 
   assert.match(res.message, /worktree \.pi\/worktrees\/1 kept/)
 })
 
-test("run: failing verify twice escalates to the large tier, which can pass", async () => {
+test("run: failing verify twice escalates to the large role, which can pass", async () => {
   const r = plan(task("1"))
   const { io, calls } = fake({ 1: [{ verify: 1 }, { verify: 2 }, {}] })
   const res = await runPlan(r, 1, io)
@@ -230,8 +233,8 @@ test("run: a stop leaves tasks running, lands those that passed, and starts noth
   const r = plan(task("1"), task("2"), task("3", { deps: ["1"] }))
   const { io, calls } = fake({ 1: ok, 2: ok, 3: ok })
   const child = io.child
-  io.child = async (t, tier, p) => {
-    const o = await child(t, tier, p)
+  io.child = async (t, role, p) => {
+    const o = await child(t, role, p)
     if (t.id === "2") await new Promise((done) => setTimeout(done, 20)), c.abort() // after task 1 passed
     return { ...o, code: t.id === "2" ? null : 0 }
   }

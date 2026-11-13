@@ -2,7 +2,7 @@
 // The git and process calls live in git.ts; runner.ts drives them through an injected IO.
 
 import { glob } from "../guardrails/rules.ts"
-import type { Plan, Task } from "./plan.ts"
+import { type Acceptance, type Plan, type Task, sectionOf } from "./plan.ts"
 import type { Role } from "../lib/profiles.ts"
 
 export type Status = "pending" | "running" | "review" | "done" | "failed"
@@ -21,6 +21,7 @@ export type RunPlan = {
   goal: string
   decisions: string
   finish?: string // command run once every task has landed
+  acceptance: Acceptance[]
   status: "running" | "done"
   tasks: RunTask[]
 }
@@ -28,12 +29,9 @@ export type RunPlan = {
 export const MAX_ATTEMPTS = 3
 export const MAX_REQUESTS = 3
 
-const section = (text: string, name: string) =>
-  new RegExp(`^## ${name}[ \\t]*$([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, "m").exec(text)?.[1].trim() ?? ""
-
 // "## Finish": the first line, as a command (backticks around it are dropped).
 export function finishCommand(text: string): string | undefined {
-  const line = section(text, "Finish").split("\n")[0]?.trim().replace(/^`+|`+$/g, "")
+  const line = sectionOf(text, "Finish").split("\n")[0]?.trim().replace(/^`+|`+$/g, "")
   return line || undefined
 }
 
@@ -104,9 +102,10 @@ export function compile(plan: Plan, text: string, slug: string): { run?: RunPlan
   const run: RunPlan = {
     slug,
     title: plan.title,
-    goal: section(text, "Goal"),
-    decisions: section(text, "Decisions"),
+    goal: sectionOf(text, "Goal"),
+    decisions: sectionOf(text, "Decisions"),
     ...(finishCommand(text) ? { finish: finishCommand(text) } : {}),
+    acceptance: plan.acceptance,
     status: "running",
     tasks: plan.tasks.map((t) => ({ ...t, status: "pending" as const })),
   }
@@ -132,8 +131,8 @@ export function nextBatch(run: RunPlan, max: number): RunTask[] {
   return run.tasks.filter((t) => t.status === "pending" && t.deps.every((d) => done.has(d))).slice(0, max)
 }
 
-// Two failed attempts on the task's own tier, then the large one.
-export const tierFor = (t: RunTask): Role => ((t.attempts ?? 0) >= 2 ? "large" : t.tier)
+// Two failed attempts on the task's own role, then the large one.
+export const roleFor = (t: RunTask): Role => ((t.attempts ?? 0) >= 2 ? "large" : t.role)
 
 // A request is granted when no task that may run at the same time touches the files, so the
 // tasks of a batch stay disjoint; the parent decides, and nobody is asked.
@@ -160,7 +159,7 @@ export function childPrompt(run: RunPlan, t: RunTask): string {
   return [
     `You are one task of a larger plan, working alone in your own git worktree. Do this task and nothing else.`,
     `Plan: ${run.title}\nGoal: ${run.goal}${run.decisions ? `\nDecisions:\n${run.decisions}` : ""}`,
-    `Task ${t.id}: ${t.title}\nAccept: ${t.accept}\nFiles you may change: ${t.files.join(", ")}`,
+    `Task ${t.id}: ${t.title}\nSpec: ${t.spec}\nMode: ${t.mode}\nFiles you may change: ${t.files.join(", ")}${t.tests.length ? `\nTests: ${t.tests.join(", ")}` : ""}`,
     `Verify command: ${t.verify}`,
     "If the task cannot be done without changing a file outside these, call request_files with the paths and the reason, " +
       "then end your turn; you are started again with the answer, and your changes so far stay in the worktree.",

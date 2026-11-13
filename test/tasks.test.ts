@@ -27,19 +27,29 @@ status: draft
 ## Goal
 Install packages on Fedora.
 
+## Acceptance
+- a1: \`cargo test --test dnf\` exits 0
+- a2: manual: the help names dnf
+- a3: deferred: no Fedora CI yet
+
 ## Tasks
 ### 1 Trait
 - files: src/pkg.rs, src/lib.rs
-- tier: large
+- role: large
+- mode: direct: a trait has no behaviour to test
+- spec: the trait exists
 - verify: cargo test pkg::
-- accept: the trait exists
+- covers: a2
 
 ### 1.1 dnf backend
 - deps: 1
-- files: src/dnf.rs
-- tier: small
+- files: src/dnf.rs, tests/*.rs
+- tests: tests/dnf.rs
+- role: small
+- mode: tdd
+- spec: dnf installs the listed packages
 - verify: cargo test dnf::
-- accept: dnf installs the listed packages
+- covers: a1
 `
 
 test("parsePlan: header fields and tasks as the task JSON wants them", () => {
@@ -47,19 +57,24 @@ test("parsePlan: header fields and tasks as the task JSON wants them", () => {
   assert.deepEqual(p.errors, [])
   assert.equal(p.status, "draft")
   assert.equal(p.title, "DNF backend")
+  assert.deepEqual(p.acceptance, [
+    { id: "a1", kind: "command", text: "cargo test --test dnf" },
+    { id: "a2", kind: "manual", text: "the help names dnf" },
+    { id: "a3", kind: "deferred", text: "no Fedora CI yet" },
+  ])
   assert.deepEqual(p.tasks[0], {
-    id: "1", title: "Trait", deps: [], files: ["src/pkg.rs", "src/lib.rs"], tier: "large",
-    verify: "cargo test pkg::", accept: "the trait exists",
+    id: "1", title: "Trait", deps: [], files: ["src/pkg.rs", "src/lib.rs"], tests: [], role: "large",
+    mode: "direct: a trait has no behaviour to test", spec: "the trait exists", verify: "cargo test pkg::", covers: ["a2"],
   })
   assert.deepEqual(p.tasks[1], {
-    id: "1.1", parent: "1", title: "dnf backend", deps: ["1"], files: ["src/dnf.rs"], tier: "small",
-    verify: "cargo test dnf::", accept: "dnf installs the listed packages",
+    id: "1.1", parent: "1", title: "dnf backend", deps: ["1"], files: ["src/dnf.rs", "tests/*.rs"], tests: ["tests/dnf.rs"],
+    role: "small", mode: "tdd", spec: "dnf installs the listed packages", verify: "cargo test dnf::", covers: ["a1"],
   })
   assert.equal(isSmall(p), false)
 })
 
 test("the format shown to the model names every field the parser reads", () => {
-  for (const key of ["deps", "files", "tier", "verify", "accept", "parent"]) assert.match(PLAN_FORMAT, new RegExp(`- ${key}:`))
+  for (const key of ["deps", "files", "tests", "role", "mode", "spec", "verify", "covers", "parent", "a1", "a2", "a3"]) assert.match(PLAN_FORMAT, new RegExp(`- ${key}:`))
   assert.match(PLAN_FORMAT, /^### 1 </m)
 })
 
@@ -67,12 +82,29 @@ test("parsePlan: no task list is a small plan; broken tasks are listed", () => {
   const none = parsePlan("# T\n\n## Goal\nx\n")
   assert.deepEqual(none.errors, [])
   assert.equal(isSmall(none), true)
-  const bad = parsePlan("# T\n## Tasks\n### 1 a\n- tier: huge\n- files: a\n### 1 b\n- deps: 9\n- files: b\n- tier: small\n- verify: v\n- accept: a\n")
-  assert.ok(bad.errors.some((e) => /task 1: missing verify, accept/.test(e)))
-  assert.ok(bad.errors.some((e) => /tier must be large or small/.test(e)))
+  const bad = parsePlan("# T\n## Tasks\n### 1 a\n- role: huge\n- files: a\n### 1 b\n- deps: 9\n- files: b\n- role: small\n- mode: direct: x\n- spec: s\n- verify: v\n")
+  assert.ok(bad.errors.some((e) => /task 1: missing mode, spec, verify/.test(e)))
+  assert.ok(bad.errors.some((e) => /role must be large or small/.test(e)))
   assert.ok(bad.errors.some((e) => /used twice/.test(e)))
   assert.ok(bad.errors.some((e) => /unknown dependency 9/.test(e)))
   assert.ok(parsePlan("no title").errors.some((e) => /Title/.test(e)))
+})
+
+test("parsePlan: modes, tests and acceptance coverage", () => {
+  const errors = (text: string) => parsePlan(text).errors
+  const one = (fields: string, acceptance = "- a1: `true` exits 0") =>
+    errors(`# T\n## Acceptance\n${acceptance}\n## Tasks\n### 1 a\n- files: src/a, tests/a\n- role: small\n- spec: s\n- verify: v\n${fields}`)
+  assert.deepEqual(one("- mode: tdd\n- tests: tests/a\n- covers: a1\n"), [])
+  assert.match(one("- mode: tdd\n- covers: a1\n").join(), /a tdd task needs tests/)
+  assert.match(one("- mode: tdd\n- tests: tests/b\n- covers: a1\n").join(), /tests tests\/b not in its files/)
+  assert.match(one("- mode: direct\n- covers: a1\n").join(), /mode must be tdd, or direct: <reason>/)
+  assert.match(one("- mode: direct: docs\n").join(), /acceptance a1 is covered by no task/)
+  assert.match(one("- mode: direct: docs\n- covers: a1, a9\n").join(), /covers a9, which is no acceptance item/)
+  assert.deepEqual(one("- mode: direct: docs\n", "- a1: deferred: later"), [])
+  const items = one("- mode: direct: docs\n- covers: a1\n", "- a1: manual: x\n- a1: it works").join()
+  assert.match(items, /acceptance a1: not "`<command>` exits 0"/)
+  assert.match(items, /acceptance id a1 is used twice/)
+  assert.deepEqual(errors("# T\n## Acceptance\n- a1: manual: x\n"), [], "no tasks: the session covers it")
 })
 
 test("status lives in the frontmatter", () => {
