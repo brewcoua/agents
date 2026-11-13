@@ -1,9 +1,9 @@
 # Coding agents
 
-Three modules under `modules/tools/` configure two coding agents. `agents-common` holds what the two
-tools share, a rules file and four skills. `opencode` holds opencode's configuration. `claude`
-installs Claude Code and holds its settings and subagents. Both tool modules require `agents-common`.
-Each shared file exists once in the repository.
+Three modules under `modules/tools/` configure two coding agents. `agents-common` holds what the
+agents share, a rules file and six skills; Pi ([`25-pi.md`](25-pi.md)) uses them too. `opencode`
+holds opencode's configuration. `claude` installs Claude Code and holds its settings and subagents.
+Both tool modules require `agents-common`. Each shared file exists once in the repository.
 
 ```
 modules/tools/agents-common/home/
@@ -12,7 +12,7 @@ modules/tools/agents-common/home/
 │   └── opencode/AGENTS.md -> ../agents/AGENTS.md
 └── .claude/
     ├── CLAUDE.md -> ../.config/agents/AGENTS.md
-    └── skills/                # grill, handoff, docs-writing, terse-output: both tools
+    └── skills/                # grill, handoff, docs-writing, terse-output, simplify, documents
 
 modules/tools/opencode/home/.config/opencode/
 ├── opencode.json              # provider, permissions, the build and plan agents
@@ -39,6 +39,22 @@ previous one. `othala module show claude` prints the method and the fingerprint.
 `~/.config/opencode/skills/`, so a skill under `.claude/skills/` reaches both tools with no
 link of its own. Put a skill there to share it, or under `.config/opencode/skills/` to keep it
 opencode's alone. A name must not exist in both places. opencode does not say which copy wins.
+
+**Documents.** The `documents` skill tells an agent which tool to use for a file that is not text.
+The tools are large, LibreOffice above all, so they come with the opt-in `documents` module, which
+installs packages and links nothing; without it the skill says which module is missing.
+
+| Format | Tools |
+|---|---|
+| PDF | `pdftotext`, `pdftoppm`, `pdfinfo` (poppler), `qpdf`, pypdf, `tesseract` for scans |
+| Word | `pandoc`, python-docx |
+| Spreadsheets | openpyxl |
+| Slides | `pandoc` to write them, the raw XML to edit them |
+| All | LibreOffice (`soffice --headless`) to convert, and to render a file to check how it looks |
+
+`SKILL.md` is a short router; the commands for each format sit in `references/<format>.md`, which
+an agent reads only for the format at hand. python-pptx and pdfplumber are not in Arch's official
+repositories, so the skill does without them.
 
 **Rules.** The rules file is `~/.config/agents/AGENTS.md`. `~/.config/opencode/AGENTS.md` and
 `~/.claude/CLAUDE.md` are symlinks committed to git, pointing at it. `othala link` links a symlink
