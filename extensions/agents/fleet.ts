@@ -73,3 +73,9 @@ export function report(a: Agent): string {
 }
 
 export const WRAP_UP = "You have reached your turn limit. Do not call more tools: give your final answer now, with what you have."
+
+// `@name message` at the start of a prompt; whether `name` is an agent is the caller's to check.
+export function mention(text: string): { ref: string; message: string } | undefined {
+  const m = /^@([\w.-]+)\s+(\S[\s\S]*)$/.exec(text.trim())
+  return m ? { ref: m[1], message: m[2].trim() } : undefined
+}

@@ -333,7 +333,8 @@ export class Spawner {
   // one; an agent parent gets it as a follow-up while it streams, else as its next prompt.
   private deliver(a: Agent) {
     if (this.closed) return
-    if (a.parent === "main") {
+    // A parent that ended (a nested agent resumed by the user) leaves main to hear of it.
+    if (a.parent === "main" || find(this.agents, a.parent)?.status !== "running") {
       this.pi.sendMessage({ customType: "agent-result", content: report(a), display: true, details: { id: a.id } }, { triggerTurn: true, deliverAs: "followUp" })
       return
     }

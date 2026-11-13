@@ -3,7 +3,7 @@ import { DynamicBorder, type ExtensionAPI, type ExtensionContext, getMarkdownThe
 import { Markdown, Text, type TUI, matchesKey } from "@earendil-works/pi-tui"
 import { edit } from "../lib/editor.ts"
 import { showList } from "../lib/view.ts"
-import { type Agent, live } from "./fleet.ts"
+import { type Agent, find, live, mention } from "./fleet.ts"
 import { Spawner } from "./runtime.ts"
 import { type Fg, conversation, fleet, tree, widget } from "./view.ts"
 
@@ -130,6 +130,20 @@ export default function (pi: ExtensionAPI) {
       fleetTui?.requestRender()
       return { consume: true }
     })
+  })
+  // `@name message` steers a running agent and resumes an ended one. A name that is no agent's,
+  // such as an @file reference, leaves the prompt alone.
+  pi.on("input", async (e, ctx) => {
+    const m = e.source === "extension" ? undefined : mention(e.text)
+    const a = m && find(spawner.agents, m.ref)
+    if (!m || !a) return { action: "continue" }
+    if (a.status === "queued") ctx.ui.notify(`${a.handle} is queued; it reads nothing until it starts.`, "warning")
+    else if (live(a)) ctx.ui.notify(spawner.steer(a, m.message), "info")
+    else {
+      const r = await spawner.start({ resume: a.id, prompt: m.message, description: a.description }, { id: a.parent, depth: a.depth - 1 })
+      ctx.ui.notify(typeof r === "string" ? r : `Resumed ${a.handle}; its result arrives as a message.`, typeof r === "string" ? "warning" : "info")
+    }
+    return { action: "handled" }
   })
   // Agents live in this process; they go with the session.
   pi.on("session_shutdown", () => spawner.shutdown())

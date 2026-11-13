@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { type Agent, find, live, newHandle, report, startable, subtree } from "../extensions/agents/fleet.ts"
+import { type Agent, find, live, mention, newHandle, report, startable, subtree } from "../extensions/agents/fleet.ts"
 
 const agent = (id: string, o: Partial<Agent> = {}): Agent => ({
   id, handle: `h${id}`, type: "scout", description: "", parent: "main", depth: 1, background: true, status: "queued", turns: 0, tokens: 0, cost: 0, ...o,
@@ -55,4 +55,12 @@ test("report says where the agent is, and its result when it ended", () => {
 test("report names the branch of an agent that worked in a worktree", () => {
   const a = agent("7", { handle: "impl-1", status: "done", result: "done", worktree: "/p/w", branch: "agent-7" })
   assert.equal(report(a), "Agent impl-1 (scout, id 7) finished:\n\ndone\n\nIts changes are committed on branch agent-7, in /p/w.")
+})
+
+test("mention: @name and a message at the start, nothing else", () => {
+  assert.deepEqual(mention("@scout-1 look in src too\nand tests"), { ref: "scout-1", message: "look in src too\nand tests" })
+  assert.deepEqual(mention("  @a1b2 go "), { ref: "a1b2", message: "go" })
+  assert.equal(mention("@scout-1"), undefined)
+  assert.equal(mention("@scout-1   "), undefined)
+  assert.equal(mention("ask @scout-1 something"), undefined)
 })
