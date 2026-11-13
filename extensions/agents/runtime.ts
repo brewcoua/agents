@@ -1,16 +1,19 @@
 import { randomUUID } from "node:crypto"
-import { readFileSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync } from "node:fs"
+import { dirname, join, resolve } from "node:path"
+import type { Message } from "@earendil-works/pi-ai"
 import {
   type AgentSession, type ExtensionAPI, type ExtensionContext, type ToolDefinition,
-  DefaultResourceLoader, defineTool, SessionManager, SettingsManager, createAgentSession, getAgentDir,
+  DefaultResourceLoader, defineTool, SessionManager, SettingsManager, buildSessionContext, convertToLlm, createAgentSession, getAgentDir,
 } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import { USAGE_EVENT } from "../budget/limits.ts"
 import { loadActive, loadProfiles, showModel, splitModel } from "../lib/profiles.ts"
 import { GUARDRAILS, runtimeFor } from "../lib/session.ts"
+import { WORKTREES_DIR, git } from "../tasks/git.ts"
 import { type Def, defDirs, loadDefs } from "./defs.ts"
 import { type Agent, GRACE_TURNS, MAX_DEPTH, WRAP_UP, find, live, newHandle, report, startable, subtree } from "./fleet.ts"
+import { END, META, descendants, end, inherited, meta, restore } from "./saved.ts"
 
 // Tools that come from one of our extensions, which an agent session then loads.
 const TOOL_EXTENSIONS: Record<string, string> = {
@@ -32,8 +35,8 @@ const ours = (path: string) => {
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} })
 
-const lastText = (s: AgentSession) => {
-  for (const m of [...s.messages].reverse()) {
+const lastText = (messages: AgentSession["messages"]) => {
+  for (const m of [...messages].reverse()) {
     if (m.role !== "assistant") continue
     const t = m.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("\n").trim()
     if (t) return t
@@ -41,8 +44,24 @@ const lastText = (s: AgentSession) => {
   return ""
 }
 
+// The `parentSession` of a session file's header, read from its first line only.
+function parentOf(file: string): string | undefined {
+  const fd = openSync(file, "r")
+  try {
+    const buf = Buffer.alloc(4096)
+    const line = buf.subarray(0, readSync(fd, buf)).toString("utf8").split("\n")[0]
+    return JSON.parse(line).parentSession
+  } catch {
+    return undefined
+  } finally {
+    closeSync(fd)
+  }
+}
+
+const dirty = async (dir: string) => (await git(dir, "status", "--porcelain")).trim() !== ""
+
 type Start = {
-  type: string
+  type?: string
   prompt: string
   description: string
   name?: string
@@ -50,6 +69,9 @@ type Start = {
   thinking?: string
   max_turns?: number
   background?: boolean
+  resume?: string
+  inherit_context?: boolean
+  isolation?: "off" | "worktree"
 }
 
 export class Spawner {
@@ -67,7 +89,27 @@ export class Spawner {
 
   bind(ctx: ExtensionContext) {
     this.ctx = ctx
+    this.restore(ctx)
     return this.reload()
+  }
+
+  // The agents an earlier Pi ran under this session, ended, so they can be read and resumed.
+  private restore(ctx: ExtensionContext) {
+    const root = ctx.sessionManager.getSessionFile()
+    if (!root) return
+    const dir = dirname(root)
+    const headers = readdirSync(dir).filter((f) => f.endsWith(".jsonl")).map((f) => {
+      const parent = parentOf(join(dir, f))
+      return { file: resolve(dir, f), parent: parent && resolve(parent) }
+    })
+    for (const file of descendants(headers, resolve(root))) {
+      const sm = SessionManager.open(file)
+      const messages = buildSessionContext(sm.getEntries(), sm.getLeafId()).messages
+      const a = restore(sm.getEntries(), file, lastText(messages))
+      if (!a || find(this.agents, a.id)) continue
+      this.agents.push(a)
+      this.transcripts.set(a.id, messages)
+    }
   }
 
   reload() {
@@ -79,7 +121,9 @@ export class Spawner {
   types = () => [...this.defs.values()]
 
   // Starts the agent, or queues it; the returned agent changes as it runs.
-  start(p: Start, parent: { id: string; depth: number }): Agent | string {
+  async start(p: Start, parent: { id: string; depth: number }): Promise<Agent | string> {
+    if (p.resume) return this.resume(p)
+    if (!p.type) return "Give the agent's type, or resume with an agent id."
     const def = this.defs.get(p.type)
     if (!def) return `No agent type ${p.type}. Types: ${[...this.defs.keys()].join(", ") || "none"}.`
     if (parent.depth >= MAX_DEPTH) return `Agents nest ${MAX_DEPTH} deep at most.`
@@ -96,6 +140,25 @@ export class Spawner {
     }
     this.agents.push(a)
     this.prompts.set(a.id, p)
+    this.pump()
+    return a
+  }
+
+  // Reopens an ended agent's session with a new prompt; its turns, tokens and handle carry on.
+  private async resume(p: Start): Promise<Agent | string> {
+    const a = find(this.agents, p.resume as string)
+    if (!a) return `No agent ${p.resume}.`
+    if (live(a)) return `Agent ${a.handle} is ${a.status}; steer it with agent_steer instead.`
+    if (!a.sessionFile || !existsSync(a.sessionFile)) return `Agent ${a.handle} has no saved session to resume.`
+    if (!this.defs.has(a.type)) return `Agent type ${a.type} no longer exists.`
+    if (a.worktree) {
+      if (!existsSync(a.worktree)) return `Agent ${a.handle}'s worktree ${a.worktree} is gone.`
+      if (await dirty(a.worktree)) return `Agent ${a.handle}'s worktree ${a.worktree} has uncommitted changes; commit or discard them first.`
+    }
+    Object.assign(a, { status: "queued", result: undefined, error: undefined, endedAt: undefined })
+    a.background = (p.background ?? true) && this.ctx?.mode !== "print"
+    this.prompts.set(a.id, { ...p, type: a.type })
+    this.transcripts.delete(a.id)
     this.pump()
     return a
   }
@@ -118,14 +181,15 @@ export class Spawner {
       const ref = p.model ? splitModel(p.model) : loadActive(getAgentDir()).roles[def.role]
       const model = ctx.modelRegistry.find(ref.provider, ref.id)
       if (!model) throw new Error(`model ${showModel(ref)} is unknown`)
+      if (!p.resume) await this.place(a, p.isolation ?? def.isolation, ctx)
       const session = await this.open(a, def, model, ctx)
       this.sessions.set(a.id, session)
       a.sessionFile = session.sessionFile
       if (a.status !== "running") throw new Error("stopped") // while it opened; finish disposes it
-      this.follow(a, session, p.max_turns ?? def.maxTurns)
+      this.follow(a, session, a.turns + (p.max_turns ?? def.maxTurns))
       await session.prompt(p.prompt)
       const last = session.messages.at(-1) as { stopReason?: string; errorMessage?: string } | undefined
-      a.result = lastText(session)
+      a.result = lastText(session.messages)
       if (a.status === "running") {
         if (last?.stopReason === "error") {
           a.status = "failed"
@@ -136,14 +200,38 @@ export class Spawner {
       if (a.status === "running") a.status = "failed"
       a.error = e instanceof Error ? e.message : String(e)
     }
+    if (a.worktree) await this.commit(a)
     this.finish(a)
   }
 
+  // Where the agent works: its parent's directory, or a new worktree of it on its own branch.
+  private async place(a: Agent, isolation: "off" | "worktree", ctx: ExtensionContext) {
+    const base = a.parent === "main" ? ctx.cwd : (find(this.agents, a.parent)?.cwd ?? ctx.cwd)
+    a.cwd = base
+    if (isolation !== "worktree") return
+    const dir = join(ctx.cwd, WORKTREES_DIR, `agent-${a.id}`)
+    await git(base, "worktree", "add", dir, "-B", `agent-${a.id}`)
+    Object.assign(a, { cwd: dir, worktree: dir, branch: `agent-${a.id}` })
+  }
+
+  private async commit(a: Agent) {
+    const dir = a.worktree as string
+    try {
+      if (!(await dirty(dir))) return
+      await git(dir, "add", "-A")
+      await git(dir, "commit", "-q", "-m", `${a.handle}: ${a.description}`)
+    } catch (e) {
+      a.error = `${a.error ? `${a.error}; ` : ""}commit failed: ${e instanceof Error ? e.message : e}`
+    }
+  }
+
   private async open(a: Agent, def: Def, model: NonNullable<ExtensionContext["model"]>, ctx: ExtensionContext) {
-    const settingsManager = SettingsManager.create(ctx.cwd, getAgentDir())
+    const p = this.prompts.get(a.id) as Start
+    const cwd = a.cwd ?? ctx.cwd
+    const settingsManager = SettingsManager.create(cwd, getAgentDir())
     const extensions = [GUARDRAILS, ...new Set((def.tools ?? []).flatMap((t) => (TOOL_EXTENSIONS[t] ? [extensionPath(TOOL_EXTENSIONS[t])] : [])))]
     const resourceLoader = new DefaultResourceLoader({
-      cwd: ctx.cwd,
+      cwd,
       agentDir: getAgentDir(),
       settingsManager,
       additionalExtensionPaths: extensions,
@@ -158,15 +246,25 @@ export class Spawner {
     await resourceLoader.reload()
     // Saved next to the parent's session, linked to it, so it can be read and resumed later.
     const parentFile = a.parent === "main" ? ctx.sessionManager.getSessionFile() : this.sessions.get(a.parent)?.sessionFile
-    const sessionManager = parentFile
-      ? SessionManager.create(ctx.cwd, dirname(parentFile), { parentSession: parentFile })
-      : SessionManager.inMemory(ctx.cwd)
+    const sessionManager = p.resume
+      ? SessionManager.open(a.sessionFile as string, undefined, cwd)
+      : parentFile
+        ? SessionManager.create(cwd, dirname(parentFile), { parentSession: parentFile })
+        : SessionManager.inMemory(cwd)
+    if (!p.resume) {
+      sessionManager.appendCustomEntry(META, meta(a))
+      if (p.inherit_context) {
+        const from = a.parent === "main"
+          ? buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages
+          : (this.sessions.get(a.parent)?.messages ?? [])
+        for (const m of inherited(convertToLlm(from) as Message[])) sessionManager.appendMessage(m)
+      }
+    }
     const nested = def.allowedAgents.length && a.depth < MAX_DEPTH ? this.tools({ id: a.id, depth: a.depth }) : []
-    const thinking = this.prompts.get(a.id)?.thinking
     const { session } = await createAgentSession({
-      cwd: ctx.cwd,
+      cwd,
       model,
-      ...(thinking ? { thinkingLevel: thinking as never } : {}),
+      ...(p.thinking ? { thinkingLevel: p.thinking as never } : {}),
       modelRuntime: await runtimeFor(ctx, model),
       resourceLoader,
       settingsManager,
@@ -178,7 +276,8 @@ export class Spawner {
     return session
   }
 
-  private follow(a: Agent, s: AgentSession, maxTurns: number) {
+  // `limit` counts every turn the agent ever had, so a resumed agent gets its max_turns anew.
+  private follow(a: Agent, s: AgentSession, limit: number) {
     s.subscribe((e) => {
       if (e.type === "tool_execution_start") a.tool = e.toolName
       else if (e.type === "tool_execution_end") a.tool = undefined
@@ -190,8 +289,8 @@ export class Spawner {
         this.pi.events.emit(USAGE_EVENT, { source: `agent:${a.type}`, cost: u.cost.total, tokens: u.input + u.output })
       } else if (e.type === "turn_end") {
         a.turns++
-        if (a.turns === maxTurns) void s.steer(WRAP_UP)
-        if (a.turns >= maxTurns + GRACE_TURNS && a.status === "running") {
+        if (a.turns === limit) void s.steer(WRAP_UP)
+        if (a.turns >= limit + GRACE_TURNS && a.status === "running") {
           a.status = "stopped"
           a.error = "turn limit"
           void s.abort()
@@ -204,7 +303,10 @@ export class Spawner {
     a.endedAt = Date.now()
     a.tool = undefined
     const s = this.sessions.get(a.id)
-    if (s) this.transcripts.set(a.id, s.messages)
+    if (s) {
+      this.transcripts.set(a.id, s.messages)
+      s.sessionManager.appendCustomEntry(END, end(a))
+    }
     s?.dispose()
     this.sessions.delete(a.id)
     for (const w of this.waiters.get(a.id) ?? []) w()
@@ -278,9 +380,13 @@ export class Spawner {
         description:
           "Start a subagent: a separate session with its own context, tools and model, which works on the prompt and returns its final answer. Background by default: the id comes back at once and the result arrives as a message at your next turn; set background false to wait for it. The types are listed in the guidelines.",
         promptSnippet: "Start a subagent to research, locate code, review or implement in its own context",
-        promptGuidelines: [`Agent types for the \`agent\` tool:\n${types()}`, "Give an agent a self-contained prompt: it does not see this conversation."],
+        promptGuidelines: [
+          `Agent types for the \`agent\` tool:\n${types()}`,
+          "Give an agent a self-contained prompt: it does not see this conversation, unless inherit_context is set.",
+          "To follow up on an agent that ended, resume it rather than starting a new one: it keeps what it learned.",
+        ],
         parameters: Type.Object({
-          type: Type.String({ description: "The agent type" }),
+          type: Type.Optional(Type.String({ description: "The agent type; not needed with resume" })),
           prompt: Type.String({ description: "The task, self-contained" }),
           description: Type.String({ description: "3 to 5 words for the fleet view" }),
           name: Type.Optional(Type.String({ description: "A handle to refer to it by, unique" })),
@@ -288,9 +394,12 @@ export class Spawner {
           thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high" })),
           max_turns: Type.Optional(Type.Integer({ minimum: 1 })),
           background: Type.Optional(Type.Boolean({ default: true })),
+          resume: Type.Optional(Type.String({ description: "Id or handle of an ended agent to continue with this prompt, in its own context" })),
+          inherit_context: Type.Optional(Type.Boolean({ description: "Start from a copy of this conversation instead of an empty one" })),
+          isolation: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("worktree")], { description: "worktree: work in a new git worktree, committed to its own branch at the end" })),
         }),
         execute: async (_id, params, signal, onUpdate) => {
-          const a = this.start(params, parent)
+          const a = await this.start(params, parent)
           if (typeof a === "string") return text(a)
           if (a.background) return text(`Started ${a.handle} (id ${a.id})${a.status === "queued" ? ", queued" : ""}. Its result arrives at your next turn.`)
           const tick = setInterval(() => onUpdate?.(text(report(a))), 1000)

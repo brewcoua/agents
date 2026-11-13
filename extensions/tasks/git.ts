@@ -14,7 +14,7 @@ const KEEP_CHARS = 8000
 
 const onPath = (name: string) => (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync(join(d, name)))
 
-function git(cwd: string, ...args: string[]): Promise<string> {
+export function git(cwd: string, ...args: string[]): Promise<string> {
   return new Promise((done, fail) =>
     execFile("git", args, { cwd, maxBuffer: 32 << 20 }, (e, stdout, stderr) =>
       e ? fail(new Error(`git ${args.join(" ")}: ${stderr.trim() || e.message}`)) : done(stdout),

@@ -1,6 +1,7 @@
 import type { Message } from "@earendil-works/pi-ai"
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent"
 import { Markdown, Text, type TUI, matchesKey } from "@earendil-works/pi-tui"
+import { edit } from "../lib/editor.ts"
 import { showList } from "../lib/view.ts"
 import { type Agent, live } from "./fleet.ts"
 import { Spawner } from "./runtime.ts"
@@ -137,11 +138,13 @@ export default function (pi: ExtensionAPI) {
     description: "The agent types, their role and the file each comes from",
     handler: async (_args, ctx) => {
       const { errors } = spawner.reload()
+      const types = spawner.types()
       await showList(ctx, {
         title: "agent types",
         empty: "No agent types.",
+        actions: [{ key: "e", label: "edit", run: async (_row, i) => void (types[i] && (await edit(pi, types[i].path, ctx))) }],
         rows: () => [
-          ...spawner.types().map((d) => ({
+          ...types.map((d) => ({
             label: `${d.name.padEnd(16)} ${d.role.padEnd(6)} ${d.description}`,
             detail: () => [d.path, `role ${d.role}, ${d.maxTurns} turns, isolation ${d.isolation}`, `tools ${d.tools?.join(", ") ?? "all"}`, ...(d.allowedAgents.length ? [`may start ${d.allowedAgents.join(", ")}`] : []), "", d.prompt].join("\n"),
           })),

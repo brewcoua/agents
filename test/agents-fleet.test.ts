@@ -51,3 +51,8 @@ test("report says where the agent is, and its result when it ended", () => {
   assert.equal(report({ ...a, status: "failed", error: "boom" }), "Agent scout-1 (scout, id 7) failed: boom")
   assert.equal(report({ ...a, status: "failed" }), "Agent scout-1 (scout, id 7) failed: unknown error")
 })
+
+test("report names the branch of an agent that worked in a worktree", () => {
+  const a = agent("7", { handle: "impl-1", status: "done", result: "done", worktree: "/p/w", branch: "agent-7" })
+  assert.equal(report(a), "Agent impl-1 (scout, id 7) finished:\n\ndone\n\nIts changes are committed on branch agent-7, in /p/w.")
+})

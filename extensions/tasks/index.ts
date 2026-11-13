@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { basename, join } from "node:path"
 import { Type } from "typebox"
@@ -7,6 +6,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext } from "@e
 import { USAGE_EVENT } from "../budget/limits.ts"
 import rules from "../guardrails/rules.json"
 import type { Rules } from "../guardrails/rules.ts"
+import { edit } from "../lib/editor.ts"
 import { showList } from "../lib/view.ts"
 import { WORKTREES_DIR, gitIO, killRun, takeUsage } from "./git.ts"
 import {
@@ -128,38 +128,12 @@ export default function (pi: ExtensionAPI) {
     if (model) await pi.setModel(model)
   }
 
-  // Opens the plan in the user's editor. In the TUI the terminal is handed over, as Pi's own
-  // ctrl+g does; elsewhere (rpc, print) the editor gets no terminal, which suits a script.
-  async function edit(path: string, ctx: ExtensionCommandContext) {
-    const [cmd, ...args] = (pi.getSettings().externalEditor || process.env.VISUAL || process.env.EDITOR || "vi").split(" ")
-    const run = () =>
-      new Promise<number | null>((done) => {
-        const child = spawn(cmd, [...args, path], { stdio: ctx.mode === "tui" ? "inherit" : "ignore" })
-        child.on("error", () => done(null))
-        child.on("close", done)
-      })
-    let code: number | null = null
-    if (ctx.mode === "tui") {
-      await ctx.ui.custom<void>((tui, _theme, _kb, done) => {
-        tui.stop()
-        void run().then((c) => {
-          code = c
-          tui.start()
-          tui.requestRender(true)
-          done()
-        })
-        return { render: () => [], invalidate() {} }
-      })
-    } else code = await run()
-    return code === 0
-  }
-
   async function review(ctx: ExtensionCommandContext) {
     if (!state) return ctx.ui.notify("Not planning. Start with /plan <request>.", "warning")
     if (!ctx.isIdle()) return ctx.ui.notify("The model is still working; review when it stops.", "warning")
     const file = join(ctx.cwd, state.path)
     if (!existsSync(file)) return ctx.ui.notify(`${state.path} does not exist yet; the model has not written the plan.`, "warning")
-    if (!(await edit(file, ctx))) return ctx.ui.notify("The editor failed; nothing was sent.", "error")
+    if (!(await edit(pi, file, ctx))) return ctx.ui.notify("The editor failed; nothing was sent.", "error")
     const comments = parseComments(readFileSync(file, "utf8"))
     if (!comments.length) return ctx.ui.notify(`No comments in ${state.path}. Comment with a >> line under quoted lines, or /plan approve.`, "info")
     pi.sendUserMessage(commentsMessage(state.path, comments))

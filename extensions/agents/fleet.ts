@@ -21,6 +21,9 @@ export type Agent = {
   result?: string
   error?: string
   sessionFile?: string
+  cwd?: string // where it works: its worktree, else its parent's directory
+  worktree?: string // with isolation worktree, its branch is `branch`
+  branch?: string
 }
 
 export const MAX_DEPTH = 2
@@ -65,7 +68,8 @@ export function report(a: Agent): string {
   if (a.status === "running") return `${head} is running: ${a.turns} turns so far${a.tool ? `, now ${a.tool}` : ""}.`
   if (a.status === "failed") return `${head} failed: ${a.error ?? "unknown error"}`
   const stopped = a.status === "stopped" ? " was stopped" : " finished"
-  return `${head}${stopped}${a.error ? ` (${a.error})` : ""}:\n\n${a.result || "(no text)"}`
+  const where = a.branch ? `\n\nIts changes are committed on branch ${a.branch}, in ${a.worktree}.` : ""
+  return `${head}${stopped}${a.error ? ` (${a.error})` : ""}:\n\n${a.result || "(no text)"}${where}`
 }
 
 export const WRAP_UP = "You have reached your turn limit. Do not call more tools: give your final answer now, with what you have."
