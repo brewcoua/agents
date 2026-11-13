@@ -251,3 +251,18 @@ test("taskGit", () => {
   assert.equal(taskGit("git -C x commit", ["a"], "/work"), false)
   assert.equal(taskGit("FOO=1 git commit", ["a"], "/work"), false)
 })
+
+test("an agent's bash list: every command must start with one of its entries", () => {
+  const git = { ...env, bash: ["git log", "git show"] }
+  const b = (command: string) => call(git, "bash", { command })
+  assert.equal(b("git log --oneline -- src"), "allow")
+  assert.equal(b("git show abc -- a.rs && git log -1"), "allow")
+  assert.equal(b("git logx"), "deny")
+  assert.equal(b("git log | sh"), "deny")
+  assert.equal(b("git log; rm x"), "deny")
+  assert.equal(b("git show $(echo a)"), "deny")
+  assert.equal(b("cat a"), "deny")
+  assert.match(decide(rules, git, "bash", { command: "cat a" }, "/work").reason, /git log, git show/)
+  // the list narrows the rules, never widens them
+  assert.equal(call({ ...env, bash: ["rm"] }, "bash", { command: "rm -rf /" }), "deny")
+})

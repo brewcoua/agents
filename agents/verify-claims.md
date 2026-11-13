@@ -3,6 +3,7 @@ name: verify-claims
 description: Checks a list of claims about the code against the repository, adversarially, and tags each Verified, Weakened or Falsified with a cited file:line. One row per claim, nothing else.
 role: small
 tools: [read, grep, find, ls, bash]
+bash: [git show]
 max_turns: 30
 ---
 

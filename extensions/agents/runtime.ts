@@ -4,13 +4,14 @@ import { dirname, join, resolve } from "node:path"
 import type { Message } from "@earendil-works/pi-ai"
 import {
   type AgentSession, type ExtensionAPI, type ExtensionContext, type ToolDefinition,
-  DefaultResourceLoader, defineTool, SessionManager, SettingsManager, buildSessionContext, convertToLlm, createAgentSession, getAgentDir,
+  DefaultResourceLoader, defineTool, SessionManager, SettingsManager, buildSessionContext, convertToLlm, createAgentSession, createBashToolDefinition, getAgentDir,
 } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import { USAGE_EVENT } from "../budget/limits.ts"
 import { loadActive, loadProfiles, showModel, splitModel } from "../lib/profiles.ts"
-import { GUARDRAILS, runtimeFor } from "../lib/session.ts"
-import { WORKTREES_DIR, git } from "../tasks/git.ts"
+import { guardrails } from "../guardrails/index.ts"
+import { runtimeFor } from "../lib/session.ts"
+import { WORKTREES_DIR, git, kill, treeOf } from "../tasks/git.ts"
 import { type Def, defDirs, loadDefs } from "./defs.ts"
 import { type Agent, GRACE_TURNS, MAX_DEPTH, WRAP_UP, find, live, newHandle, report, startable, subtree } from "./fleet.ts"
 import { END, META, descendants, end, inherited, meta, restore } from "./saved.ts"
@@ -243,14 +244,16 @@ export class Spawner {
     const p = this.prompts.get(a.id) as Start
     const cwd = a.cwd ?? ctx.cwd
     const settingsManager = SettingsManager.create(cwd, getAgentDir())
-    const extensions = [GUARDRAILS, ...new Set((def.tools ?? []).flatMap((t) => (TOOL_EXTENSIONS[t] ? [extensionPath(TOOL_EXTENSIONS[t])] : [])))]
+    const extensions = [...new Set((def.tools ?? []).flatMap((t) => (TOOL_EXTENSIONS[t] ? [extensionPath(TOOL_EXTENSIONS[t])] : [])))]
     const resourceLoader = new DefaultResourceLoader({
       cwd,
       agentDir: getAgentDir(),
       settingsManager,
       additionalExtensionPaths: extensions,
+      // Its own guardrails, with the type's commands: agents share this process's environment.
+      extensionFactories: [guardrails({ bash: def.bash })],
       // Other packages' extensions stay: claude-bridge must see the agent's prompt to serve it.
-      // Of ours, only guardrails and the tools the type names; no UI, commands or nested hooks.
+      // Of ours, only the tools the type names; no UI, commands or nested hooks.
       extensionsOverride: (base) => ({ ...base, extensions: base.extensions.filter((e) => !ours(e.resolvedPath) || extensions.includes(e.resolvedPath)) }),
       noSkills: true,
       noPromptTemplates: true,
@@ -285,10 +288,22 @@ export class Spawner {
       sessionManager,
       // An allowlist disables every tool it does not name, the agent tools included.
       ...(def.tools ? { tools: [...def.tools, ...nested.map((t) => t.name)] } : {}),
-      customTools: nested,
+      customTools: [...nested, this.bash(a, cwd, settingsManager)],
     })
     await session.bindExtensions({})
     return session
+  }
+
+  private tree = (a: Agent) => treeOf(this.ctx?.cwd ?? "", `agent-${a.id}`)
+
+  // Pi's bash, marking what the agent runs so that stopping it kills those processes too.
+  private bash(a: Agent, cwd: string, settings: SettingsManager) {
+    const tree = this.tree(a)
+    return createBashToolDefinition(cwd, {
+      commandPrefix: settings.getShellCommandPrefix(),
+      shellPath: settings.getShellPath(),
+      spawnHook: (c) => ({ ...c, env: { ...c.env, OTHALA_TASK_TREE: tree } }),
+    }) as unknown as ToolDefinition<any, any>
   }
 
   // `limit` counts every turn the agent ever had, so a resumed agent gets its max_turns anew.
@@ -358,6 +373,8 @@ export class Spawner {
       const s = this.sessions.get(a.id)
       if (s) void s.abort()
       else if (wasQueued) this.finish(a)
+      const tree = this.tree(a)
+      kill((t) => t === tree)
     }
   }
 

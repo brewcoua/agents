@@ -315,11 +315,22 @@ export function taskGit(command: string, files: string[], cwd: string): boolean 
   })
 }
 
+// Whether each command of a line starts with one of the prefixes. Nothing substituted.
+function only(command: string, prefixes: string[]): boolean {
+  const parsed = parse(command)
+  if (parsed.error || parsed.ask.length || !parsed.commands.length) return false
+  return parsed.commands.every((c) => {
+    const text = program(c.words).join(" ")
+    return prefixes.some((p) => text === p || text.startsWith(`${p} `))
+  })
+}
+
 export type Env = {
   home: string
   readFile: (path: string) => string | undefined
   taskFiles?: string[] // OTHALA_TASK_FILES: set in a task's child pi
   taskVerify?: string // OTHALA_TASK_VERIFY
+  bash?: string[] // an agent type's commands: every command run must start with one
   realpath?: (path: string) => string // for edits; absent in tests, where paths are lexical
 }
 
@@ -331,6 +342,7 @@ export function decide(rules: Rules, env: Env, toolName: string, input: Record<s
   if (toolName === "bash") {
     const command = String(input.command ?? "")
     if (command === env.taskVerify) return { verdict: "allow", reason: "" }
+    if (env.bash && !only(command, env.bash)) return { verdict: "deny", reason: `this agent runs only ${env.bash.join(", ")}` }
     d = strictest(d, checkCommand(rules, command, cwd))
     if (d.verdict === "ask" && env.taskFiles && taskGit(command, env.taskFiles, cwd)) d = { verdict: "allow", reason: "" }
     d = strictest(d, checkCommit(command, (p) => env.readFile(resolve(cwd, p))) ?? d)

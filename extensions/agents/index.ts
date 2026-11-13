@@ -160,7 +160,7 @@ export default function (pi: ExtensionAPI) {
         rows: () => [
           ...types.map((d) => ({
             label: `${d.name.padEnd(16)} ${d.role.padEnd(6)} ${d.description}`,
-            detail: () => [d.path, `role ${d.role}, ${d.maxTurns} turns, isolation ${d.isolation}`, `tools ${d.tools?.join(", ") ?? "all"}`, ...(d.allowedAgents.length ? [`may start ${d.allowedAgents.join(", ")}`] : []), "", d.prompt].join("\n"),
+            detail: () => [d.path, `role ${d.role}, ${d.maxTurns} turns, isolation ${d.isolation}`, `tools ${d.tools?.join(", ") ?? "all"}`, ...(d.bash ? [`bash ${d.bash.join(", ")}`] : []), ...(d.allowedAgents.length ? [`may start ${d.allowedAgents.join(", ")}`] : []), "", d.prompt].join("\n"),
           })),
           ...errors.map((e) => ({ label: `skipped: ${e}`, dim: true })),
         ],

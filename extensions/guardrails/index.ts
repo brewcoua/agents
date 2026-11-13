@@ -36,15 +36,11 @@ function realpath(path: string): string {
   }
 }
 
-const env: Env = { home: homedir(), readFile, realpath, taskFiles: TASK_FILES, taskVerify: process.env.OTHALA_TASK_VERIFY }
-
 // What this session asked about or refused, newest last, for /guardrails.
 type Logged = { time: Date; what: string; reason: string; outcome: "denied" | "allowed by you" | "declined by you" | "refused, no UI" }
 const LOG_MAX = 200
-const log: Logged[] = []
-const note = (e: Logged) => log.push(e) > LOG_MAX && log.shift()
 
-async function enforce(toolName: string, input: Record<string, unknown>, ctx: ExtensionContext) {
+async function enforce(env: Env, note: (e: Logged) => void, toolName: string, input: Record<string, unknown>, ctx: ExtensionContext) {
   const d = decide(R, env, toolName, input, ctx.cwd)
   if (d.verdict === "allow") return undefined
   const what = toolName === "bash" ? String(input.command) : `${toolName} ${String(input.path ?? input.file_path ?? "")}`
@@ -62,7 +58,13 @@ async function enforce(toolName: string, input: Record<string, unknown>, ctx: Ex
   return ok ? undefined : { block: true, reason: "Blocked by guardrails: the user declined." }
 }
 
-export default function (pi: ExtensionAPI) {
+// An agent session (extensions/agents) loads guardrails through this with its own settings, since
+// in-process agents share this process's environment.
+export const guardrails = (task: Pick<Env, "taskFiles" | "taskVerify" | "bash">) => (pi: ExtensionAPI) => {
+  const env: Env = { home: homedir(), readFile, realpath, ...task }
+  const log: Logged[] = []
+  const note = (e: Logged) => log.push(e) > LOG_MAX && log.shift()
+
   // Denied tools are not declared to the model. Codemode can still call tools
   // outside the active set, so tool_call below is the enforcement.
   const hide = () => {
@@ -73,7 +75,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", hide)
   pi.on("before_agent_start", hide)
 
-  pi.on("tool_call", (event, ctx) => enforce(event.toolName, event.input, ctx))
+  pi.on("tool_call", (event, ctx) => enforce(env, note, event.toolName, event.input, ctx))
 
   pi.registerCommand("guardrails", {
     description: "What guardrails asked about or refused in this Pi, newest first",
@@ -104,3 +106,5 @@ export default function (pi: ExtensionAPI) {
     return changed ? { content } : undefined
   })
 }
+
+export default guardrails({ taskFiles: TASK_FILES, taskVerify: process.env.OTHALA_TASK_VERIFY })

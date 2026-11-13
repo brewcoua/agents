@@ -3,6 +3,7 @@ name: precedent
 description: Finds past changes in git history similar to a planned one, what they touched, and the fixes that followed them, so a planner knows what went wrong last time.
 role: small
 tools: [read, grep, find, ls, bash]
+bash: [git rev-parse, git log, git show, git diff]
 max_turns: 25
 ---
 

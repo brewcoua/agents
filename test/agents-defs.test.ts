@@ -8,9 +8,9 @@ import { MAX_TURNS, PACKAGE_AGENTS, loadDefs, parseDef } from "../extensions/age
 const md = (front: string, body = "Do it.") => `---\n${front}\n---\n\n${body}\n`
 
 test("a definition with every field", () => {
-  const d = parseDef(md("name: scout\ndescription: Answers one question\nrole: small\ntools: [read, grep]\nmax_turns: 10\nisolation: worktree\nallowed_agents: locate, scout"), "/a/scout.md")
+  const d = parseDef(md("name: scout\ndescription: Answers one question\nrole: small\ntools: [read, grep]\nbash: [git log, git show]\nmax_turns: 10\nisolation: worktree\nallowed_agents: locate, scout"), "/a/scout.md")
   assert.deepEqual(d, {
-    name: "scout", description: "Answers one question", role: "small", tools: ["read", "grep"], maxTurns: 10,
+    name: "scout", description: "Answers one question", role: "small", tools: ["read", "grep"], bash: ["git log", "git show"], maxTurns: 10,
     isolation: "worktree", allowedAgents: ["locate", "scout"], prompt: "Do it.", path: "/a/scout.md",
   })
 })

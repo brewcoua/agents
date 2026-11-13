@@ -10,6 +10,7 @@ export type Def = {
   description: string
   role: Role
   tools?: string[] // all of the session's tools when absent
+  bash?: string[] // command prefixes: every command it runs starts with one (guardrails)
   maxTurns: number
   isolation: "off" | "worktree"
   allowedAgents: string[]
@@ -45,6 +46,7 @@ export function parseDef(text: string, path: string): Def | string {
     description: f.description,
     role: role as Role,
     tools: list(f.tools),
+    bash: list(f.bash),
     maxTurns: maxTurns as number,
     isolation,
     allowedAgents: list(f.allowed_agents) ?? [],
