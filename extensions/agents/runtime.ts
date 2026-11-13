@@ -81,6 +81,7 @@ export class Spawner {
   private prompts = new Map<string, Start>()
   private transcripts = new Map<string, AgentSession["messages"]>() // of ended agents
   private waiters = new Map<string, (() => void)[]>()
+  private pending = new Map<string, Agent[]>() // children's results an idle parent agent has yet to get
   private ctx?: ExtensionContext
   private closed = false
   onRunning = () => {} // the set of running agents changed
@@ -188,6 +189,18 @@ export class Spawner {
       if (a.status !== "running") throw new Error("stopped") // while it opened; finish disposes it
       this.follow(a, session, a.turns + (p.max_turns ?? def.maxTurns))
       await session.prompt(p.prompt)
+      // An agent does not end before its children: their results become its next prompt.
+      for (;;) {
+        if (a.status !== "running") break
+        const results = this.pending.get(a.id) ?? []
+        this.pending.delete(a.id)
+        if (results.length) await session.prompt(results.map(report).join("\n\n"))
+        else {
+          const kids = this.agents.filter((x) => x.parent === a.id && x.background && live(x))
+          if (!kids.length) break
+          await Promise.race(kids.map((k) => this.wait(k)))
+        }
+      }
       const last = session.messages.at(-1) as { stopReason?: string; errorMessage?: string } | undefined
       a.result = lastText(session.messages)
       if (a.status === "running") {
@@ -269,7 +282,8 @@ export class Spawner {
       resourceLoader,
       settingsManager,
       sessionManager,
-      ...(def.tools ? { tools: def.tools } : {}),
+      // An allowlist disables every tool it does not name, the agent tools included.
+      ...(def.tools ? { tools: [...def.tools, ...nested.map((t) => t.name)] } : {}),
       customTools: nested,
     })
     await session.bindExtensions({})
@@ -316,7 +330,7 @@ export class Spawner {
   }
 
   // A background agent's result goes to its parent's next turn: main gets a message that starts
-  // one; an agent parent gets it only while it still runs, else it reads it with agent_result.
+  // one; an agent parent gets it as a follow-up while it streams, else as its next prompt.
   private deliver(a: Agent) {
     if (this.closed) return
     if (a.parent === "main") {
@@ -325,6 +339,7 @@ export class Spawner {
     }
     const parent = this.sessions.get(a.parent)
     if (parent?.isStreaming) void parent.followUp(report(a))
+    else this.pending.set(a.parent, [...(this.pending.get(a.parent) ?? []), a])
   }
 
   wait(a: Agent, signal?: AbortSignal): Promise<void> {
