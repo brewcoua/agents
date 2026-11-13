@@ -137,12 +137,29 @@ reads the rate-limit figures providers put on their responses, and writes them, 
 | Codex | the `x-codex-primary-*` and `x-codex-secondary-*` headers, or the `codex.rate_limits` stream event: used percent, window in minutes, reset in Unix seconds. Read from the Codex CLI's parser, not yet seen from Pi |
 | others | any header whose name has `ratelimit`, `rate-limit` or `quota`, kept as it came, so the format shows in `/usage` before anything parses it |
 
-The status line shows the current model's provider, `claude-bridge 5h 0% · 7d 8%`. `/usage` lists
+The status line shows the windows of the current model's provider, `5h 0% · 7d 8%`. `/usage` lists
 each provider's last report, dimmed after a day, with the reset times on `Enter`; then the tokens
 and cost of the last 24 hours, 7 days and 30 days, by model, read from the session files under
 `~/.pi/agent/sessions`, and by source for the task children, scouts and `/btw` the budget recorded,
 which keep no session of their own. A message's cost is the one recorded when it ran, 0 for the
 bridge. The list refreshes every 5 seconds and sits over the editor; a run carries on underneath.
+
+### ui
+
+Replaces Pi's startup header and three-line footer with one line each, in the theme's colours.
+
+The header reads `pi 1.5.2  6 skills  / commands · ! bash · esc interrupt · ctrl+c clear · ctrl+d
+exit`. The footer reads, left to right: the project directory and git branch, the context window's
+fill, the other extensions' statuses (`plan` and `tasks` first, plan mode in the warning colour),
+then, flush right, the model, its thinking level and the active profile:
+
+```text
+cli master │ ctx 4% │ budget 0% · 21/5M tok │ 5h 13% · 7d 10%          claude-opus-5-5 · medium  claude
+```
+
+Every percentage is green under 50, yellow from 70 and red from 90. On a narrow terminal the left
+parts drop from the end, then the model is cut. Pi's token and cache counters are not shown; spend
+is in `/budget` and `/usage`. Only the interactive TUI gets either line.
 
 ### web
 

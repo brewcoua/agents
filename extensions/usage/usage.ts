@@ -70,9 +70,8 @@ const pct = (w: Window) => `${w.name} ${Math.round(w.used * 100)}%`
 export const windowsLine = (q: Seen, now: number) =>
   q.windows.map((w) => (w.resetsAt && w.resetsAt > now ? `${pct(w)} (${ago(w.resetsAt - now)})` : pct(w))).join(" · ")
 
-// The bottom bar: the windows only; nothing for a provider that reports none.
-export const statusLine = (provider: string, q: Seen | undefined) =>
-  q?.windows.length ? `${provider} ${q.windows.map(pct).join(" · ")}` : undefined
+// The bottom bar, for the current model's provider: the windows only; nothing when it reports none.
+export const statusLine = (q: Seen | undefined) => (q?.windows.length ? q.windows.map(pct).join(" · ") : undefined)
 
 const DAY = 86_400_000
 const add = (u: Usage, tokens: number, cost: number) => ((u.tokens += tokens), (u.cost += cost))

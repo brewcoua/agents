@@ -41,7 +41,7 @@ const line = (label: string, u: Usage) => `${label.padEnd(34)} ${count(u.tokens)
 export default function (pi: ExtensionAPI) {
   const show = (ctx: ExtensionContext) => {
     const provider = ctx.model?.provider
-    ctx.ui.setStatus("usage", provider ? statusLine(provider, readState()[provider]) : undefined)
+    ctx.ui.setStatus("usage", provider ? statusLine(readState()[provider]) : undefined)
   }
 
   // A run keeps going while this records: a failed write only loses one reading.

@@ -54,8 +54,8 @@ test("state: merge stamps the provider, parse survives junk", () => {
 test("windowsLine and statusLine: percent and time to reset", () => {
   const q = { at: NOW, windows: [{ name: "5h", used: 0.42, resetsAt: NOW + 90 * 60_000 }, { name: "7d", used: 0.181 }], raw: {} }
   assert.equal(windowsLine(q, NOW), "5h 42% (1h30m) · 7d 18%")
-  assert.equal(statusLine("claude-bridge", q), "claude-bridge 5h 42% · 7d 18%")
-  assert.equal(statusLine("x", { at: NOW, windows: [], raw: { a: "1" } }), undefined)
+  assert.equal(statusLine(q), "5h 42% · 7d 18%")
+  assert.equal(statusLine({ at: NOW, windows: [], raw: { a: "1" } }), undefined)
 })
 
 test("spend: own messages by model and day window, children by source", () => {
