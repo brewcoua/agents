@@ -136,7 +136,7 @@ export function parse(src: string): Parsed {
           i += fd[0].length
         }
       } else if (op) {
-        if (pendingRedirect) return { ...out, error: `redirection ${pendingRedirect} has no target` }
+        if (pendingRedirect && !inWord) return { ...out, error: `redirection ${pendingRedirect} has no target` }
         endCommand(op === "|" || op === "|&")
         i += op.length
       } else {

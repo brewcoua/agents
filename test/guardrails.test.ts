@@ -98,6 +98,10 @@ test("redirections", () => {
   assert.equal(verdict("echo hi > notes.txt"), "ask")
   assert.equal(verdict("echo hi > /tmp/x"), "allow")
   assert.equal(verdict("echo hi > .env"), "deny")
+  // an operator right after the target ends it
+  assert.equal(verdict("ls 2>/dev/null; ls"), "allow")
+  assert.equal(verdict("ls >notes.txt&& ls"), "ask")
+  assert.equal(verdict("ls >;ls"), "deny")
 })
 
 test("secrets in arguments", () => {
