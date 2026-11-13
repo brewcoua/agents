@@ -46,14 +46,17 @@ message sits in a `$(cat <<EOF ...)` the whole command text is scanned instead.
 asking, the plan files under `.pi/plans/` included. Outside it they always ask, `/tmp` included,
 whatever `external` says.
 
-The `tasks` extension starts each task's child `pi` with two variables, and guardrails then runs in
-task mode. `OTHALA_TASK_FILES`, a `:`-separated list of globs relative to the project, allows `edit`
-and `write` to those paths and refuses every other path; the refusal tells the model to call
-`request_files` (see Running tasks). `OTHALA_TASK_VERIFY` is the task's verify
-command: a bash command equal to it is allowed, as is `git add <paths>` where every path is one of
-the task's files, and `git commit`, to which the commit rule still applies. Everything else follows
-the normal rules, and `ask` means deny, since a child has nobody to answer. Bash is otherwise not
-confined by `OTHALA_TASK_FILES`; the land step checks the diff.
+Each agent session ([Agents](#agents)) loads its own guardrails, with the settings below; they
+are not environment variables, since agents share Pi's process. An agent has no UI, so `ask` means
+deny there.
+
+- A type's `bash` list: every command of a bash line must start with one of its entries, such as
+  `git log`, or the line is denied; the normal rules still apply to what passes.
+- A task agent's files, globs relative to its worktree, allow `edit` and `write` to those paths and
+  refuse every other path; the refusal tells the model to call `request_files` (see Running tasks).
+  Its verify command is allowed when a bash command equals it, as is a line of only `git add <paths>`
+  where every path is one of the task's files, and `git commit`, to which the commit rule still
+  applies. Bash is otherwise not confined by the files; the land step checks the diff.
 
 ## Extensions
 
@@ -121,7 +124,7 @@ model sees, and a call that still arrives returns an error telling the model to 
 
 Caps spend per session. It adds up cost and tokens (`input + output`) from each assistant message's usage, which is the cost Pi shows in its footer. It warns once at 25, 50 and 75% of the nearer cap. At 100% it blocks every further tool call with a reason telling the model to report and stop. Set `PI_BUDGET_USD` (default 2) and `PI_BUDGET_TOKENS` (default 5000000); 0 disables a cap. A model with no catalog price, such as the Claude bridge on a subscription, records a cost of 0, so only the token cap applies to it. There is no cap on output tokens per request; use `maxTokens` in models.json. A resumed or forked session starts from what its history already spent.
 
-Usage of the sessions this one starts counts against the same caps: task children (`tasks`), scouts (`scouts`) and `/btw` (`btw`). A child `pi` gets `OTHALA_BUDGET_REPORT`, a file its own budget extension writes its usage to after each message; the parent reads it when the child exits. `/btw` adds up its side session's messages. Each figure is stored in the session as a `budget-usage` entry, so a resume counts it again. A child also has its own caps, so one task cannot spend more than a session may.
+Usage of the sessions this one starts counts against the same caps: each agent under `agent:<type>`, task agents and `/plan` scouts included (`agent:task`, `agent:plan-scout`), and `/btw` (`btw`). Each adds up its session's messages as they end. Each figure is stored in the session as a `budget-usage` entry, so a resume counts it again.
 
 The status line shows `budget 12% · 610k/5M tok`, with the dollar figure when something cost more than 0. `/budget` shows the caps, this session's own usage, each source above, and the total.
 
@@ -129,7 +132,7 @@ The status line shows `budget 12% · 610k/5M tok`, with the dollar figure when s
 
 Shows how much of each subscription is left, and what was spent. It sends no request of its own: it
 reads the rate-limit figures providers put on their responses, and writes them, per provider, to
-`~/.pi/agent/othala-usage.json`, which every Pi on the machine shares, task children included.
+`~/.pi/agent/othala-usage.json`, which every Pi on the machine shares.
 
 | Provider | Where the figures come from |
 |---|---|
@@ -140,8 +143,7 @@ reads the rate-limit figures providers put on their responses, and writes them, 
 The status line shows the windows of the current model's provider, `5h 0% · 7d 8%`. `/usage` lists
 each provider's last report, dimmed after a day, with the reset times on `Enter`; then the tokens
 and cost of the last 24 hours, 7 days and 30 days, by model, read from the session files under
-`~/.pi/agent/sessions`, and by source for the task children, scouts and `/btw` the budget recorded,
-which keep no session of their own. A message's cost is the one recorded when it ran, 0 for the
+`~/.pi/agent/sessions`, and by source for the agents and `/btw` the budget recorded. A message's cost is the one recorded when it ran, 0 for the
 bridge. The list refreshes every 5 seconds and sits over the editor; a run carries on underneath.
 
 ### ui
@@ -206,8 +208,8 @@ provider's real errors yet.
 
 ## Tasks
 
-The `tasks` extension plans before it builds, then runs the plan's tasks in git worktrees, each in a
-child `pi`. Planning and review come first; a small change is implemented in the same session.
+The `tasks` extension plans before it builds, then runs the plan's tasks in git worktrees, each as an
+agent ([Agents](#agents)), so the fleet shows them. Planning and review come first; a small change is implemented in the same session.
 
 ### Tiers
 
@@ -222,11 +224,9 @@ allow without asking. An `ask` verdict counts as a refusal here, since the model
 Other tools (memory, MCP, codemode) are refused too. The model asks you with `ask_user_question`,
 researches with `read`, `grep`, `find`, `ls` and `scout`, and writes `.pi/plans/<slug>.md`.
 
-`scout` takes up to 6 questions and runs one child `pi` per question, in parallel, on the `small`
-model: print mode, `--no-session`, only `read`, `grep`, `find`, `ls`, no MCP, and `-na`, so a
-project's own extensions and settings are not loaded. Each has 180 seconds and its answer is cut at
-8000 characters; a failed scout reports its error. The child is the `pi` on PATH, the `pi` module's
-wrapper, so it stays offline.
+`scout` takes up to 6 questions and starts one `plan-scout` agent per question, in parallel, on the
+`small` role, with only `read`, `grep`, `find` and `ls`. Each has 180 seconds and its answer is cut
+at 8000 characters; a failed scout reports its error. Scouts need the agents extension.
 
 `/plan cancel` leaves plan mode without approving. Leaving restores the model you were using. Plan mode
 survives a resume.
@@ -293,20 +293,21 @@ project's full tests. The run goes through these steps:
    unless their fixed beginnings or endings differ.
 2. Execute. A task is ready when it is pending and its dependencies are done; a batch is up to `maxConcurrent`
    ready tasks, which compiling made disjoint. Each gets `git worktree add .pi/worktrees/<id> -B pi-task-<id> HEAD`
-   (characters git dislikes in the id become `_`) and a child `pi` there: `pi -p --no-session --no-mcp -na`
-   on the tier's model, whose only prompt is the plan's goal and decisions plus the task's title, files, verify
-   command and accept line. The child edits, runs verify, and commits in its worktree, with `OTHALA_TASK_FILES`
-   and `OTHALA_TASK_VERIFY` set (see Guardrails). With `sccache` on PATH, `RUSTC_WRAPPER=sccache` is set too, so
-   Cargo's per-worktree `target/` shares compiles; other languages need nothing. A child has 30 minutes.
+   (characters git dislikes in the id become `_`) and a `task` agent there on the tier's role, whose prompt
+   is the plan's goal and decisions plus the task's title, files, verify command and accept line. The agent
+   edits, runs verify, and commits in its worktree, under guardrails holding the task's files and verify
+   command (see Guardrails). With `sccache` on PATH, its bash and the verify command get
+   `RUSTC_WRAPPER=sccache`, so Cargo's per-worktree `target/` shares compiles; other languages need nothing.
+   An agent has 30 minutes. `/tasks run` needs the agents extension.
 
-   A child that needs a file outside its `files` calls `request_files` with the paths and a reason, and ends.
-   The parent grants it when no task that may run at the same time (not done, not ordered with it by `deps`)
-   has an overlapping file, adds the paths to the task's `files` and its `granted` list, and starts a child
+   An agent that needs a file outside its `files` calls `request_files` with the paths and a reason, and ends.
+   The runner grants it when no task that may run at the same time (not done, not ordered with it by `deps`)
+   has an overlapping file, adds the paths to the task's `files` and its `granted` list, and starts an agent
    again in the same worktree, without a reset, with the answer in its prompt. Otherwise the answer is a refusal
    naming the other task. Nobody is asked. Three requests per task are answered; a fourth ends the attempt.
 3. Check. No model reads the diff: the parent checks that nothing is uncommitted, that there is a commit,
    that every file in `git diff --name-only <base> HEAD` matches the task's `files`, and re-runs the verify
-   command in the worktree. A failure goes back to a fresh worktree and a new child with the failure as notes.
+   command in the worktree. A failure goes back to a fresh worktree and a new agent with the failure as notes.
    Two failures on the task's tier give a third attempt on `large`; after that the task is `failed`, the run
    stops, and its worktree stays for you to look at.
 4. Land. The batch's passing tasks land one at a time: the task's branch is rebased onto the current HEAD in
@@ -320,18 +321,18 @@ project's full tests. The run goes through these steps:
 attempts reset, and starts them over: their worktrees are reset to the new base without asking, and recreated
 when a killed `git` left them locked. A failed task's worktree is there to look at only until then.
 
-Every process a run starts carries `OTHALA_TASK_TREE=<project>#<task>` in its environment, inherited by what
-it starts in turn. Stopping kills each process whose `/proc/<pid>/environ` holds that marker, so what a child
-started in its own process group or session goes too, and a shell you opened in a worktree does not. The
-moments it runs:
+Every process a task's agent or verify command starts carries `OTHALA_TASK_TREE=<project>#<task>` in its
+environment, inherited by what it starts in turn. Stopping kills each process whose `/proc/<pid>/environ` holds
+that marker, so what an agent started in its own process group or session goes too, and a shell you opened in a
+worktree does not. The agents themselves live in Pi's process. The moments it runs:
 
 | When | What stops |
 |---|---|
-| `/tasks stop` | the children and everything they started; tasks that already passed their checks still land, nothing new starts |
+| `/tasks stop` | the task agents and everything they started; tasks that already passed their checks still land, nothing new starts |
 | Pi quits, or the session is replaced | the same, at `session_shutdown` |
-| Pi is killed | each child, at once, by the kernel: children run under `setpriv --pdeathsig KILL` (util-linux). What they started is stopped at the next Pi start in the project, unless another Pi holds the lock |
+| Pi is killed | the agents, with Pi; a verify or finish command at once, by the kernel, since it runs under `setpriv --pdeathsig KILL` (util-linux). What they started is stopped at the next Pi start in the project, unless another Pi holds the lock |
 | `/tasks run` | whatever an earlier run left, before it starts |
-| A child passes 30 minutes | that task's processes |
+| An agent passes 30 minutes | that agent and that task's processes |
 
 `.pi/plans/` and `.pi/worktrees/` are in the `git` module's global ignore in config, so no project's
 `.gitignore` changes.
@@ -362,6 +363,7 @@ You locate code. ...
 | `name`, `description` | required | |
 | `role` | `large` | `top`, `large` or `small`: the model is that role of the active profile ([Profiles](#profiles)) |
 | `tools` | every tool | an allowlist; `web_search`, `web_fetch` and `web_render` load the `web` extension |
+| `bash` | any command | command prefixes such as `git log`: every command the agent runs must start with one ([Guardrails](#guardrails)) |
 | `max_turns` | 50 | after it, the agent is told to wrap up; 3 turns later it is stopped |
 | `isolation` | `off` | `worktree`: it works in `.pi/worktrees/agent-<id>` on branch `agent-<id>`, committed when it ends |
 | `allowed_agents` | none | the types it may start itself; agents nest 2 deep |
@@ -385,8 +387,8 @@ The package's types:
 `precedent` and `verify-claims` are adapted from rpiv's `precedent-locator` and `claim-verifier`
 ([rpiv-mono](https://github.com/juicesharp/rpiv-mono), MIT, Copyright (c) 2026 juicesharp).
 
-The `bash` limits in the `review`, `precedent` and `verify-claims` prompts (git reads only) are
-instructions; guardrails apply to agent sessions as to yours, but nothing narrower is enforced yet.
+`precedent` and `verify-claims` have `bash` lists of git reads. `review` has none, but an agent
+cannot ask, so its `bash` runs only what guardrails allow without asking.
 
 ### Starting agents
 
@@ -405,7 +407,8 @@ The model calls `agent` with a `type`, a self-contained `prompt` and a short `de
 
 At most `maxConcurrent` of `profiles.json` agents run at once per nesting level; the rest queue. An
 agent with children waits for its background children before it ends, and gets their results as
-its next prompt. Stopping an agent stops its children. Agents stop when the session ends.
+its next prompt. Stopping an agent stops its children, and kills the processes its `bash` started,
+found by `OTHALA_TASK_TREE=<project>#agent-<id>` as for tasks. Agents stop when the session ends.
 
 ### The fleet
 
