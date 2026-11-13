@@ -57,6 +57,7 @@ export class Spawner {
   sessions = new Map<string, AgentSession>()
   private defs = new Map<string, Def>()
   private prompts = new Map<string, Start>()
+  private transcripts = new Map<string, AgentSession["messages"]>() // of ended agents
   private waiters = new Map<string, (() => void)[]>()
   private ctx?: ExtensionContext
   private closed = false
@@ -202,7 +203,9 @@ export class Spawner {
   private finish(a: Agent) {
     a.endedAt = Date.now()
     a.tool = undefined
-    this.sessions.get(a.id)?.dispose()
+    const s = this.sessions.get(a.id)
+    if (s) this.transcripts.set(a.id, s.messages)
+    s?.dispose()
     this.sessions.delete(a.id)
     for (const w of this.waiters.get(a.id) ?? []) w()
     this.waiters.delete(a.id)
@@ -235,7 +238,6 @@ export class Spawner {
       if (!live(a)) continue
       const wasQueued = a.status === "queued"
       a.status = "stopped"
-      a.error ??= "stopped"
       const s = this.sessions.get(a.id)
       if (s) void s.abort()
       else if (wasQueued) this.finish(a)
@@ -246,6 +248,17 @@ export class Spawner {
   shutdown() {
     this.closed = true
     for (const a of this.agents.filter((x) => x.parent === "main")) this.stop(a.id)
+  }
+
+  messages = (id: string) => this.sessions.get(id)?.messages ?? this.transcripts.get(id) ?? []
+
+  // A foreground agent's caller stops waiting; the result comes as a background one's does.
+  background(a: Agent) {
+    if (a.status !== "running" || a.background) return false
+    a.background = true
+    for (const w of this.waiters.get(a.id) ?? []) w()
+    this.waiters.delete(a.id)
+    return true
   }
 
   steer(a: Agent, message: string): string {
@@ -281,9 +294,12 @@ export class Spawner {
           if (typeof a === "string") return text(a)
           if (a.background) return text(`Started ${a.handle} (id ${a.id})${a.status === "queued" ? ", queued" : ""}. Its result arrives at your next turn.`)
           const tick = setInterval(() => onUpdate?.(text(report(a))), 1000)
-          signal?.addEventListener("abort", () => this.stop(a.id), { once: true })
+          const stop = () => this.stop(a.id)
+          signal?.addEventListener("abort", stop, { once: true })
           await this.wait(a, signal)
           clearInterval(tick)
+          signal?.removeEventListener("abort", stop)
+          if (live(a)) return text(`Moved ${a.handle} (id ${a.id}) to the background. Its result arrives at your next turn.`)
           return text(report(a))
         },
       }),
