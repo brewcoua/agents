@@ -1,8 +1,6 @@
-import { fileURLToPath } from "node:url"
 import {
   DefaultResourceLoader,
   DynamicBorder,
-  ModelRuntime,
   SessionManager,
   SettingsManager,
   createAgentSession,
@@ -14,29 +12,16 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import { Container, Markdown, Text, matchesKey } from "@earendil-works/pi-tui"
 import { USAGE_EVENT, type Usage } from "../budget/limits.ts"
+import { GUARDRAILS, runtimeFor } from "../lib/session.ts"
 import { READ_ONLY, SYSTEM, onlyReadOnly, parseArgs, transcript } from "./side.ts"
 
 // Characters of the main conversation handed to the side session.
 const CONTEXT_CHARS = 20000
 
-// The guardrails are the only extension loaded in the side session, so its tools obey the
-// same path rules. It has no UI, so what guardrails would ask about is refused.
-const GUARDRAILS = fileURLToPath(new URL("../guardrails/index.ts", import.meta.url))
-
 // An in-process session: no session file and no other extension, so the exchange never
 // reaches the main history and /btw cannot recurse. Same model as the main one.
 async function openSession(ctx: ExtensionContext, model: NonNullable<ExtensionContext["model"]>) {
-  // A provider registered by an extension (claude-bridge) exists only in the main runtime.
-  const config = ctx.modelRegistry.getRegisteredProviderConfig(model.provider)
-  const native = ctx.modelRegistry.getRegisteredNativeProvider(model.provider)
-  let modelRuntime: ModelRuntime | undefined
-  if (config || native) {
-    modelRuntime = await ModelRuntime.create({ allowModelNetwork: false })
-    if (native) modelRuntime.registerNativeProvider(native)
-    else if (config) modelRuntime.registerProvider(model.provider, config)
-    await modelRuntime.refresh({ allowNetwork: false })
-  }
-
+  const modelRuntime = await runtimeFor(ctx, model)
   const settingsManager = SettingsManager.inMemory()
   const resourceLoader = new DefaultResourceLoader({
     cwd: ctx.cwd,
