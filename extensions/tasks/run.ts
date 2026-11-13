@@ -155,22 +155,53 @@ export function answer(run: RunPlan, t: RunTask, req: Request): string {
 
 export const filesOutside = (changed: string[], globs: string[]) => changed.filter((f) => !globs.some((g) => glob(g, f)))
 
+// A tdd task's first commit, as the runner found it: its files, its added lines, and verify run there.
+export type Red = { files: string[]; added: string; code: number | null; output: string }
+
+// Test names in added lines: Rust `fn`, pytest `def test_`, JS `test("...")` and `it("...")`.
+export function testNames(added: string): string[] {
+  const all = added.matchAll(/\bfn\s+(\w+)|\bdef\s+(test_\w*)|\b(?:test|it)\s*\(\s*(["'`])(.+?)\3/g)
+  return [...new Set([...all].map((m) => m[1] ?? m[2] ?? m[4]))]
+}
+
+// TDD's red step. The failure must be in what the red commit added: output naming a new test, or one of
+// its files, as a compiler does for a test calling a function not written yet; not a build error elsewhere.
+export function redFailure(t: RunTask, red: Red | undefined): string | undefined {
+  if (!red) return "A tdd task commits twice at least: its tests alone first (red), then the change (green)."
+  const outside = filesOutside(red.files, t.tests)
+  if (outside.length) return `The first commit (red) must touch only the tests, ${t.tests.join(", ")}; it touches ${outside.join(", ")}.`
+  if (red.code === 0) return `At the first commit (red), \`${t.verify}\` passes: the new tests must fail before the change.`
+  const names = testNames(red.added)
+  if (!names.length) return "The first commit (red) adds no test by a name the runner can find: `fn`, `def test_`, `test(\"...\"`, `it(\"...\"`."
+  if ([...names, ...red.files].some((n) => red.output.includes(n))) return undefined
+  return `At the first commit (red), \`${t.verify}\` fails, but its output names none of the new tests (${names.join(", ")}) nor ${red.files.join(", ")}: ` +
+    `it must fail in them, not on a build error elsewhere.\n${tail(red.output, 2000)}`
+}
+
 export function childPrompt(run: RunPlan, t: RunTask): string {
   return [
     `You are one task of a larger plan, working alone in your own git worktree. Do this task and nothing else.`,
     `Plan: ${run.title}\nGoal: ${run.goal}${run.decisions ? `\nDecisions:\n${run.decisions}` : ""}`,
     `Task ${t.id}: ${t.title}\nSpec: ${t.spec}\nMode: ${t.mode}\nFiles you may change: ${t.files.join(", ")}${t.tests.length ? `\nTests: ${t.tests.join(", ")}` : ""}`,
-    `Verify command: ${t.verify}`,
+    `Verify command: ${t.verify}\nRun it exactly as written, with no pipe, redirect or other command added: guardrails refuse any other form.`,
     "If the task cannot be done without changing a file outside these, call request_files with the paths and the reason, " +
       "then end your turn; you are started again with the answer, and your changes so far stay in the worktree.",
-    "Steps: make the change; run the verify command exactly as written until it passes; then `git add` the files you changed " +
-      "(new files included, by path) and `git commit` with a short imperative message, as a command line of their own: " +
-      "`git add <paths> && git commit -m <message>`, nothing else chained, or guardrails refuse it. Nothing may be left uncommitted. " +
-      "The message never mentions Claude, Pi or AI and has no Co-Authored-By line. Do not push or switch branches.",
+    t.mode === "tdd" ? tddSteps(t) : "Steps: make the change; run the verify command until it passes; then commit.",
+    "To commit, `git add` the files (new files included, by path) and `git commit` with a short imperative message, as a command line " +
+      "of their own: `git add <paths> && git commit -m <message>`, nothing else chained, or guardrails refuse it. Nothing may be left " +
+      "uncommitted. The message never mentions Claude, Pi or AI and has no Co-Authored-By line. Do not push or switch branches.",
     ...(t.notes ? [`Your previous attempt failed:\n${t.notes}\nFix that.`] : []),
     ...(t.answer ? [`You asked for more files. The answer: ${t.answer}. Your changes so far are still in the worktree; go on from there.`] : []),
   ].join("\n\n")
 }
+
+const tddSteps = (t: RunTask) =>
+  "Steps, test first:\n" +
+  `1. Red: write the tests the spec describes, in only ${t.tests.join(", ")}. Run the verify command and see the new tests fail, ` +
+  "in the tests themselves, not on a build error elsewhere. Commit only those paths.\n" +
+  "2. Green: the smallest change that makes the verify command pass. Commit.\n" +
+  "3. Refactor: simplify your own diff, the verify command still passing. Commit, or nothing when there is nothing to cut.\n" +
+  "The runner checks each step from your commits, and squashes them into one when the task lands."
 
 export const tail = (text: string, max: number) => (text.length <= max ? text : `[...]\n${text.slice(-max)}`)
 

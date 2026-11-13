@@ -2,8 +2,8 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { parsePlan } from "../extensions/tasks/plan.ts"
 import {
-  type RunPlan, type RunTask, answer, childPrompt, compile, filesOutside, finishCommand, nextBatch,
-  overlap, roleFor, safeId, start, validate,
+  type Red, type RunPlan, type RunTask, answer, childPrompt, compile, filesOutside, finishCommand, nextBatch,
+  overlap, redFailure, roleFor, safeId, start, testNames, validate,
 } from "../extensions/tasks/run.ts"
 import { type IO, runPlan } from "../extensions/tasks/runner.ts"
 
@@ -110,7 +110,30 @@ test("child prompt", () => {
   const t = task("1", { files: ["a.rs", "b/*.rs"], verify: "cargo test", notes: "it broke" })
   const p = childPrompt(plan(t), t)
   for (const s of ["Goal: g", "- d", "Task 1: t1", "a.rs, b/*.rs", "cargo test", "it broke", "request_files"]) assert.ok(p.includes(s), s)
+  assert.ok(!p.includes("Red:"))
+  const tdd = childPrompt(plan(t), { ...t, mode: "tdd", tests: ["b/*.rs"] })
+  for (const s of ["Red:", "Green:", "Refactor:", "only b/*.rs"]) assert.ok(tdd.includes(s), s)
   assert.ok(childPrompt(plan(t), { ...t, answer: "granted: x" }).includes("The answer: granted: x"))
+})
+
+test("testNames: Rust and Python functions, JS test and it strings", () => {
+  const added = [
+    "#[test]", "fn json_flag() {", "    fn helper() {}", "def test_empty(tmp):", "def other():",
+    `test("prints one object", () => {`, "it('handles []', async () => {", "test (`x`)", "fn json_flag() {",
+  ].join("\n")
+  assert.deepEqual(testNames(added), ["json_flag", "helper", "test_empty", "prints one object", "handles []", "x"])
+})
+
+test("redFailure: only tests, verify fails, and fails in what the commit added", () => {
+  const t = task("1", { mode: "tdd", tests: ["tests/*.rs"], verify: "cargo test" })
+  const red = { files: ["tests/a.rs"], added: "fn json_flag() {", code: 101, output: "test json_flag ... FAILED" }
+  assert.equal(redFailure(t, red), undefined)
+  assert.equal(redFailure(t, { ...red, output: "error[E0425]: cannot find function `export`\n --> tests/a.rs:4:5" }), undefined, "a build error in the new tests")
+  assert.match(redFailure(t, undefined) ?? "", /commits twice at least/)
+  assert.match(redFailure(t, { ...red, files: ["tests/a.rs", "src/a.rs"] }) ?? "", /must touch only the tests, tests\/\*\.rs; it touches src\/a\.rs/)
+  assert.match(redFailure(t, { ...red, code: 0 }) ?? "", /passes: the new tests must fail/)
+  assert.match(redFailure(t, { ...red, added: "let x = 1" }) ?? "", /adds no test/)
+  assert.match(redFailure(t, { ...red, output: "error: src/lib.rs:3 mismatched types" }) ?? "", /names none of the new tests \(json_flag\) nor tests\/a\.rs/)
 })
 
 test("answer: granted unless a task that may run alongside touches the files", () => {
@@ -125,7 +148,7 @@ test("answer: granted unless a task that may run alongside touches the files", (
 })
 
 // A fake IO: `script` says what each attempt of each task did; `requests` what each child asked for.
-type Attempt = { files?: string[]; uncommitted?: string[]; verify?: number }
+type Attempt = { files?: string[]; uncommitted?: string[]; verify?: number; red?: Red }
 function fake(script: Record<string, Attempt[]>, landError: Record<string, string> = {}, requests: Record<string, string[][]> = {}) {
   const calls: string[] = []
   const saved: string[] = []
@@ -145,6 +168,7 @@ function fake(script: Record<string, Attempt[]>, landError: Record<string, strin
       return files && { files, reason: "needed" }
     },
     changed: async (t) => ({ files: current(t).files ?? t.files, uncommitted: current(t).uncommitted ?? [] }),
+    red: async (t) => (calls.push(`red ${t.id}`), current(t).red),
     verify: async (t) => ({ code: current(t).verify ?? 0, output: `output of ${t.id}` }),
     land: async (t) => (calls.push(`land ${t.id}`), landError[t.id]),
     remove: async (t) => void calls.push(`remove ${t.id}`),
@@ -191,6 +215,16 @@ test("run: failing verify twice escalates to the large role, which can pass", as
   assert.deepEqual(calls.filter((c) => c.startsWith("child")), ["child 1 small", "child 1 small", "child 1 large"])
   assert.equal(r.tasks[0].attempts, 2)
   assert.equal(r.tasks[0].notes, undefined)
+})
+
+test("run: a tdd task is checked at its red commit; a direct one is not", async () => {
+  const red: Red = { files: ["t/1.txt"], added: "fn one() {", code: 1, output: "one FAILED" }
+  const r = plan(task("1", { mode: "tdd", tests: ["t/*"], files: ["1.txt", "t/*"] }), task("2"))
+  const { io, calls } = fake({ 1: [{ red: { ...red, code: 0 } }, { red }], 2: ok })
+  const res = await runPlan(r, 2, io)
+  assert.equal(res.ok, true)
+  assert.deepEqual(calls.filter((c) => c.startsWith("red")), ["red 1", "red 1"])
+  assert.equal(r.tasks[0].attempts, 1)
 })
 
 test("run: uncommitted work and a missing commit are failures with notes", async () => {

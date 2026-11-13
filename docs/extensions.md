@@ -329,11 +329,18 @@ project's full tests. The run goes through these steps:
    naming the other task. Nobody is asked. Three requests per task are answered; a fourth ends the attempt.
 3. Check. No model reads the diff: the parent checks that nothing is uncommitted, that there is a commit,
    that every file in `git diff --name-only <base> HEAD` matches the task's `files`, and re-runs the verify
-   command in the worktree. A failure goes back to a fresh worktree and a new agent with the failure as notes.
+   command in the worktree. A `tdd` task's prompt names the cycle (red: the tests alone, failing; green: the
+   smallest change that passes; refactor), and the check reads it from the commits: there are two at least,
+   the first touches only `tests`, and verify run at that commit fails with output naming a test the commit
+   added or one of its files. Test names come from its added lines: `fn <name>`, `def test_<name>`,
+   `test("<name>"` and `it("<name>"`. A file name counts so a compiler's error in a test calling a function
+   not written yet is a red; a build error elsewhere is not. This holds for cargo, `node --test` and pytest;
+   a runner that prints neither is unchecked. A failure goes back to a fresh worktree and a new agent with the failure as notes.
    Two failures on the task's role give a third attempt on `large`; after that the task is `failed`, the run
    stops, and its worktree stays for you to look at.
 4. Land. The batch's passing tasks land one at a time: the task's branch is rebased onto the current HEAD in
-   its worktree, then the current branch is fast-forwarded to it, so HEAD moves once or not at all. Then the
+   its worktree and squashed into one commit, with the message of a `tdd` task's second commit (green) or a
+   `direct` task's first, then the current branch is fast-forwarded to it, so HEAD moves once or not at all. Then the
    worktree and its branch are removed. A rebase that does not apply is aborted and fails the task. Later
    batches branch from the new HEAD, so they see their dependencies.
 5. Finish. When every task is done, the `## Finish` command runs in the project; if it fails the run stays open and

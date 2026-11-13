@@ -60,6 +60,8 @@ function sh(cwd: string, command: string, args: string[], env: NodeJS.ProcessEnv
   })
 }
 
+const lines = (s: string) => s.split("\n").filter(Boolean)
+
 export const worktreeDir = (cwd: string, t: RunTask) => join(cwd, WORKTREES_DIR, safeId(t.id))
 const branch = (t: RunTask) => `pi-task-${safeId(t.id)}`
 
@@ -136,24 +138,44 @@ export function gitIO(cwd: string, spawner: Spawner, save: IO["save"], log: IO["
     },
     async changed(t) {
       const dir = worktreeDir(cwd, t)
-      const lines = (s: string) => s.split("\n").filter(Boolean)
       return {
         files: lines(await git(dir, "diff", "--name-only", base(t), "HEAD")),
         uncommitted: lines(await git(dir, "status", "--porcelain")).map((l) => l.slice(3)),
       }
     },
     verify: (t) => sh(worktreeDir(cwd, t), "sh", ["-c", t.verify], { ...process.env, ...sccache }, tree(t)),
-    // Rebased in the task's worktree, then a fast-forward: HEAD moves once or not at all, so an
-    // interruption never leaves a half-applied series in the project.
+    // check() found the worktree clean, so checking out the red commit and back loses nothing.
+    async red(t) {
+      const dir = worktreeDir(cwd, t)
+      const [first, second] = lines(await git(dir, "rev-list", "--reverse", `${base(t)}..HEAD`))
+      if (!second) return undefined
+      const files = lines(await git(dir, "diff-tree", "--no-commit-id", "--name-only", "-r", first))
+      const added = lines(await git(dir, "show", "--format=", "-U0", first)).filter((l) => l.startsWith("+") && !l.startsWith("+++")).join("\n")
+      await git(dir, "checkout", "-q", "--detach", first)
+      try {
+        return { files, added, ...(await this.verify(t)) }
+      } finally {
+        await git(dir, "checkout", "-q", branch(t))
+      }
+    },
+    // Rebased in the task's worktree and squashed, then a fast-forward: HEAD moves once or not at
+    // all, so an interruption never leaves a half-applied series in the project. The squash keeps
+    // the message of the commit that made the change: a tdd task's second (green), else its first.
     async land(t) {
       const dir = worktreeDir(cwd, t)
+      const head = (await git(cwd, "rev-parse", "HEAD")).trim()
       try {
-        await git(dir, "rebase", (await git(cwd, "rev-parse", "HEAD")).trim())
+        await git(dir, "rebase", head)
       } catch (e) {
         await git(dir, "rebase", "--abort").catch(() => {})
         return e instanceof Error ? e.message : String(e)
       }
       try {
+        const commits = lines(await git(dir, "rev-list", "--reverse", `${head}..HEAD`))
+        if (commits.length > 1) {
+          await git(dir, "reset", "-q", "--soft", head)
+          await git(dir, "commit", "-q", "-C", commits[t.mode === "tdd" ? 1 : 0])
+        }
         await git(cwd, "merge", "--ff-only", branch(t))
       } catch (e) {
         return e instanceof Error ? e.message : String(e)

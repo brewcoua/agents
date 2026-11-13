@@ -2,7 +2,7 @@
 // with fakes. git.ts is the IO that runs git, the task agents and the verify commands.
 
 import {
-  MAX_ATTEMPTS, MAX_REQUESTS, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, nextBatch, safeId, roleFor, summary, tail,
+  MAX_ATTEMPTS, MAX_REQUESTS, type Red, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, nextBatch, redFailure, safeId, roleFor, summary, tail,
 } from "./run.ts"
 import type { Role } from "../lib/profiles.ts"
 
@@ -14,6 +14,7 @@ export type IO = {
   child(t: RunTask, role: Role, prompt: string): Promise<Output> // a task agent; code 0 when it ended well
   request(t: RunTask): Promise<Request | undefined> // what the agent asked for with request_files, taken once
   changed(t: RunTask): Promise<{ files: string[]; uncommitted: string[] }> // against the base commit
+  red(t: RunTask): Promise<Red | undefined> // a tdd task's first commit, with verify run there; none with fewer than two commits
   verify(t: RunTask): Promise<Output>
   land(t: RunTask): Promise<string | undefined> // an error text, or nothing; all or nothing on HEAD
   remove(t: RunTask): Promise<void>
@@ -27,6 +28,8 @@ async function check(t: RunTask, io: IO, child: Output): Promise<string | undefi
   if (!files.length) return `No commit was made${child.code ? ` (the agent: ${tail(child.output, 800)})` : ""}.`
   const outside = filesOutside(files, t.files)
   if (outside.length) return `The commits touch files outside the task's files: ${outside.join(", ")}. Touch only ${t.files.join(", ")}.`
+  const red = t.mode === "tdd" && redFailure(t, await io.red(t))
+  if (red) return red
   const v = await io.verify(t)
   if (v.code !== 0) return `The verify command \`${t.verify}\` failed (exit ${v.code}):\n${tail(v.output, 3000)}`
   return undefined
