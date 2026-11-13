@@ -86,6 +86,24 @@ Lists the models of an OpenAI-compatible server at start-up and registers them w
 
 A discovered model gets an output cap of 64K tokens, since ollama reports none and Pi's default of 16K is too low for coding. A cloud model (`<name>:cloud`, or `<name>-cloud` as in `gpt-oss:120b-cloud`) gets its per-million price from `extensions/models-discovery/prices.json`, by name, so the budget's dollar cap counts ollama cloud; a local model costs 0. Off-peak prices are left out: the extension does not know the clock they follow.
 
+### ask
+
+The `ask_user_question` tool: the model asks up to 4 questions, each with 2 to 4 options, and gets
+the answers back as text. It takes the parameters, error codes and result text of
+`rpiv-ask-user-question` 2.15, so a model that knows that tool calls this one unchanged.
+
+The dialog has a tab per question, and a Submit tab when there are several; `←`/`→` or `Tab` move
+between them. `↑`/`↓` move through a question's options; `Enter` picks one, or on a `multiSelect`
+question confirms the options toggled with `Space` (the focused one when none is). The last row,
+`Type something.`, takes a typed answer. An option's `preview` shows below the list while it is
+focused. Submit sends what is answered and names the questions left blank; `Esc` cancels, and the
+model reads `User declined to answer questions`.
+
+Options labelled `Other`, `Type something.` or `Next` are refused, as are duplicate questions or
+labels. `questions` sent as a JSON string is decoded first, as some tool-call parsers send it. The
+dialog needs the interactive TUI: in print, JSON and RPC mode the tool is removed from those the
+model sees, and a call that still arrives returns an error telling the model to ask in chat.
+
 ### budget
 
 Caps spend per session. It adds up cost and tokens (`input + output`) from each assistant message's usage, which is the cost Pi shows in its footer. It warns once at 25, 50 and 75% of the nearer cap. At 100% it blocks every further tool call with a reason telling the model to report and stop. Set `PI_BUDGET_USD` (default 2) and `PI_BUDGET_TOKENS` (default 5000000); 0 disables a cap. A model with no catalog price, such as the Claude bridge on a subscription, records a cost of 0, so only the token cap applies to it. There is no cap on output tokens per request; use `maxTokens` in models.json. A resumed or forked session starts from what its history already spent.

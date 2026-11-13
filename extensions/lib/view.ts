@@ -1,7 +1,7 @@
 // The dashboards' screen: a list, and a scrollable detail page per row. Not an extension: Pi
 // loads only extensions/*/index.ts, and this directory has none.
 
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent"
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui"
 
 export type Row = {
@@ -19,6 +19,12 @@ export type ListOptions = {
   empty: string
   actions?: Action[]
   refreshMs?: number // for live state, such as a task run
+}
+
+// The title line of a screen: `─── title ────`.
+export function rule(theme: Theme, width: number, title: string): string {
+  const head = `─── ${title} `
+  return truncateToWidth(theme.fg("accent", head) + theme.fg("borderMuted", "─".repeat(Math.max(0, width - visibleWidth(head)))), width)
 }
 
 export async function showList(ctx: ExtensionCommandContext, o: ListOptions): Promise<void> {
@@ -43,14 +49,10 @@ export async function showList(ctx: ExtensionCommandContext, o: ListOptions): Pr
       if (timer) clearInterval(timer)
       done()
     }
-    const rule = (width: number, title: string) => {
-      const head = `─── ${title} `
-      return truncateToWidth(theme.fg("accent", head) + theme.fg("borderMuted", "─".repeat(Math.max(0, width - visibleWidth(head)))), width)
-    }
 
     return {
       render(width: number): string[] {
-        const out = [rule(width, o.title)]
+        const out = [rule(theme, width, o.title)]
         if (detail) {
           const page = detail.slice(top, top + height())
           out.push(...page.map((l) => truncateToWidth(` ${l}`, width)))
