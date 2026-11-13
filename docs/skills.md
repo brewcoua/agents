@@ -9,7 +9,8 @@ Code read the same files.
 The rules carry the commit rule: no `Co-Authored-By`, no "Generated with", no mention of Claude, Pi
 or AI in a commit message. The guardrails extension enforces it in Pi
 ([`extensions.md`](extensions.md#guardrails)). The text names the subagents `locate`, `scout`,
-`review` and `research`.
+`review` and `research`; Claude Code's are in `claude/agents/`, with `implement` and `refactor`.
+Pi's arrive with its subagent spawner.
 
 ## Documents
 

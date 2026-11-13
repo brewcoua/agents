@@ -8,12 +8,14 @@ AGENTS.md      # the working rules
 skills/        # grill, handoff, docs-writing, terse-output, simplify, documents
 extensions/    # the Pi extensions; extensions/lib/ is shared code
 test/          # unit tests (*.test.ts) and the load test (load.ts)
+claude/agents/ # Claude Code's subagents: locate, scout, review, research, implement, refactor
 docs/          # extensions.md, skills.md
 ```
 
 [othala config](https://gitlab.com/futharkd/othala/config)'s `pi` module clones this repository to
 `~/.local/share/othala/agents`, names the clone in Pi's `packages` setting, and links `AGENTS.md`
-where Pi and Claude Code read their rules. `package.json`'s `pi` field lists what Pi loads from it.
+where Pi and Claude Code read their rules. `package.json`'s `pi` field lists what Pi loads from it;
+config's `claude` module links the skills and `claude/agents/` for Claude Code.
 
 ## Checks
 
