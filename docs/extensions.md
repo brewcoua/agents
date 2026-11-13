@@ -343,8 +343,13 @@ project's full tests. The run goes through these steps:
    `direct` task's first, then the current branch is fast-forwarded to it, so HEAD moves once or not at all. Then the
    worktree and its branch are removed. A rebase that does not apply is aborted and fails the task. Later
    batches branch from the new HEAD, so they see their dependencies.
-5. Finish. When every task is done, the `## Finish` command runs in the project; if it fails the run stays open and
-   `/tasks run` repeats it. Then the plan file is marked `status: done` and a summary of the tasks is shown.
+5. Finish. When every task is done, the `## Finish` command and every acceptance command run in the project.
+   If any fails, one remediation follows: a `task` agent on `large`, in `.pi/worktrees/_fix`, gets only the
+   failing commands and their output, may change any file of the plan's tasks, and makes one minimal fix.
+   Its verify command is the failing commands joined by `&&`. It is checked and landed as a task is, and the
+   commands run again. A second failure stops the run for you, and the fix is not made again: after you fix
+   it, `/tasks run` runs the commands again. Then the plan file is marked `status: done`, and the summary
+   lists the `manual` acceptance items to check by hand.
 
 `/tasks run` on a plan that stopped puts `running`, `review` and `failed` tasks back to `pending` with their
 attempts reset, and starts them over: their worktrees are reset to the new base without asking, and recreated

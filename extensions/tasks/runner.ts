@@ -2,7 +2,7 @@
 // with fakes. git.ts is the IO that runs git, the task agents and the verify commands.
 
 import {
-  MAX_ATTEMPTS, MAX_REQUESTS, type Red, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, nextBatch, redFailure, safeId, roleFor, summary, tail,
+  MAX_ATTEMPTS, MAX_REQUESTS, type Failure, type Red, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, fixPrompt, fixTask, nextBatch, redFailure, safeId, roleFor, showFailures, summary, tail,
 } from "./run.ts"
 import type { Role } from "../lib/profiles.ts"
 
@@ -71,6 +71,35 @@ async function attempt(run: RunPlan, t: RunTask, io: IO, signal?: AbortSignal): 
   }
 }
 
+// FINISH: the finish command, then every acceptance command, in the project.
+async function finishFailures(run: RunPlan, io: IO): Promise<Failure[]> {
+  const commands = [...(run.finish ? [run.finish] : []), ...run.acceptance.filter((a) => a.kind === "command").map((a) => a.text)]
+  const out: Failure[] = []
+  for (const command of commands) {
+    io.log(`finish: ${command}`)
+    const f = await io.finish(command)
+    if (f.code !== 0) out.push({ command, ...f })
+  }
+  return out
+}
+
+// One agent, one attempt, checked and landed as a task is. Returns why it did not land.
+async function remediate(run: RunPlan, failures: Failure[], io: IO, signal?: AbortSignal): Promise<string | undefined> {
+  const fix = fixTask(run, failures)
+  io.log(`finish: one fix for ${failures.map((f) => f.command).join(", ")}`)
+  await io.prepare(fix)
+  const child = await io.child(fix, "large", fixPrompt(fix, failures))
+  if (signal?.aborted) return
+  run.remediated = true
+  io.save(run)
+  const failure = await check(fix, io, child)
+  const kept = `\n  worktree .pi/worktrees/${safeId(fix.id)} kept`
+  if (failure) return failure + kept
+  const error = await io.land(fix)
+  if (error) return `Landing failed: ${error}${kept}`
+  await io.remove(fix)
+}
+
 export async function runPlan(run: RunPlan, maxConcurrent: number, io: IO, signal?: AbortSignal): Promise<{ ok: boolean; message: string }> {
   let landFailed = false
   for (;;) {
@@ -109,13 +138,19 @@ export async function runPlan(run: RunPlan, maxConcurrent: number, io: IO, signa
   }
   if (run.tasks.some((t) => t.status !== "done")) return { ok: false, message: `Stopped with tasks that cannot start.\n${summary(run)}` }
 
-  // FINISH
-  if (run.finish) {
-    io.log(`finish: ${run.finish}`)
-    const f = await io.finish(run.finish)
-    if (f.code !== 0) return { ok: false, message: `Every task landed, but \`${run.finish}\` failed (exit ${f.code}):\n${tail(f.output, 3000)}\n/tasks run repeats it.` }
+  let failures = await finishFailures(run, io)
+  if (failures.length && !run.remediated) {
+    const why = await remediate(run, failures, io, signal)
+    if (signal?.aborted) return { ok: false, message: `Stopped. /tasks run resumes.\n\n${summary(run)}` }
+    failures = await finishFailures(run, io)
+    if (failures.length) {
+      const fix = why ? `\nThe fix did not land: ${why}` : ""
+      return { ok: false, message: `Every task landed, but these still fail after one fix:\n${showFailures(failures)}${fix}\nFix them; /tasks run checks again.` }
+    }
   }
+  if (failures.length) return { ok: false, message: `Every task landed, but these fail, and the one fix was made:\n${showFailures(failures)}\nFix them; /tasks run checks again.` }
   run.status = "done"
   io.save(run)
-  return { ok: true, message: summary(run) }
+  const manual = run.acceptance.filter((a) => a.kind === "manual").map((a) => `- ${a.id}: ${a.text}`)
+  return { ok: true, message: summary(run) + (manual.length ? `\n\nCheck by hand:\n${manual.join("\n")}` : "") }
 }

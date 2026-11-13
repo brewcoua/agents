@@ -241,15 +241,65 @@ test("run: a failed landing stops the run; failed finish keeps the plan open", a
   assert.equal(a.ok, false)
   assert.deepEqual(r.tasks.map((t) => t.status), ["failed", "pending"])
   assert.match(r.tasks[0].notes ?? "", /Landing failed: conflict/)
+})
 
-  const f = plan(task("1"))
-  f.finish = "make test"
-  const fk = fake({ 1: ok })
-  fk.io.finish = async () => ({ code: 2, output: "boom" })
-  const b = await runPlan(f, 1, fk.io)
-  assert.equal(b.ok, false)
-  assert.equal(f.status, "running")
-  assert.match(b.message, /make test` failed \(exit 2\)/)
+// Finish: `codes` holds what each command exits with, one per run of it; 0 when none is left.
+function finishing(codes: Record<string, number[]>, fix: Attempt[] = ok) {
+  const r = plan(task("1", { files: ["src/*"] }), task("2"))
+  r.finish = "make test"
+  r.acceptance = [
+    { id: "a1", kind: "command", text: "./a1" },
+    { id: "a2", kind: "manual", text: "the help names it" },
+    { id: "a3", kind: "deferred", text: "later" },
+  ]
+  const fk = fake({ 1: ok, 2: ok, "!fix": fix })
+  fk.io.finish = async (c) => (fk.calls.push(`finish ${c}`), { code: codes[c]?.shift() ?? 0, output: `out of ${c}` })
+  const prompts: string[] = []
+  const child = fk.io.child
+  fk.io.child = async (t, role, p) => (prompts.push(p), child(t, role, p))
+  return { r, ...fk, prompts }
+}
+
+test("finish: the finish command and every acceptance command; manual items are listed", async () => {
+  const { r, io, calls } = finishing({})
+  const res = await runPlan(r, 2, io)
+  assert.equal(res.ok, true)
+  assert.deepEqual(calls.filter((c) => c.startsWith("finish")), ["finish make test", "finish ./a1"])
+  assert.match(res.message, /Check by hand:\n- a2: the help names it/)
+  assert.equal(r.status, "done")
+})
+
+test("finish: one remediation gets only the failures, lands, and both run again", async () => {
+  const { r, io, calls, prompts } = finishing({ "./a1": [1] })
+  const res = await runPlan(r, 2, io)
+  assert.equal(res.ok, true)
+  const fix = calls.slice(calls.indexOf("finish ./a1") + 1)
+  assert.deepEqual(fix, ["prepare !fix", "child !fix large", "land !fix", "remove !fix", "finish make test", "finish ./a1"])
+  const p = prompts.at(-1) ?? ""
+  assert.match(p, /\.\/a1 \(exit 1\):\nout of \.\/a1/)
+  assert.ok(!p.includes("make test") && !p.includes("Goal:"), "only the failing commands")
+  assert.equal(r.remediated, true)
+})
+
+test("finish: a second failure stops for the user, and the fix is not tried again", async () => {
+  const { r, io, calls } = finishing({ "make test": [2, 2, 2] })
+  const res = await runPlan(r, 2, io)
+  assert.equal(res.ok, false)
+  assert.equal(r.status, "running")
+  assert.match(res.message, /still fail after one fix[\s\S]*make test \(exit 2\)/)
+  const again = await runPlan(r, 2, io)
+  assert.equal(again.ok, false)
+  assert.equal(calls.filter((c) => c.startsWith("child !fix")).length, 1)
+  assert.match(again.message, /make test \(exit 2\)/)
+})
+
+test("finish: a fix that fails its check is not landed", async () => {
+  const { r, io, calls } = finishing({ "./a1": [1, 1] }, [{ files: ["elsewhere.txt"] }])
+  const res = await runPlan(r, 2, io)
+  assert.equal(res.ok, false)
+  assert.ok(!calls.includes("land !fix"))
+  assert.match(res.message, /outside the task's files: elsewhere\.txt/)
+  assert.match(res.message, /\.pi\/worktrees\/_fix kept/)
 })
 
 test("run: a request is answered and the child goes on without a reset", async () => {

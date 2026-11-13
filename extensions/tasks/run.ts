@@ -22,6 +22,7 @@ export type RunPlan = {
   decisions: string
   finish?: string // command run once every task has landed
   acceptance: Acceptance[]
+  remediated?: boolean // the one fix for a failing finish was made
   status: "running" | "done"
   tasks: RunTask[]
 }
@@ -183,15 +184,55 @@ export function childPrompt(run: RunPlan, t: RunTask): string {
     `You are one task of a larger plan, working alone in your own git worktree. Do this task and nothing else.`,
     `Plan: ${run.title}\nGoal: ${run.goal}${run.decisions ? `\nDecisions:\n${run.decisions}` : ""}`,
     `Task ${t.id}: ${t.title}\nSpec: ${t.spec}\nMode: ${t.mode}\nFiles you may change: ${t.files.join(", ")}${t.tests.length ? `\nTests: ${t.tests.join(", ")}` : ""}`,
-    `Verify command: ${t.verify}\nRun it exactly as written, with no pipe, redirect or other command added: guardrails refuse any other form.`,
+    verifyLine(t),
     "If the task cannot be done without changing a file outside these, call request_files with the paths and the reason, " +
       "then end your turn; you are started again with the answer, and your changes so far stay in the worktree.",
     t.mode === "tdd" ? tddSteps(t) : "Steps: make the change; run the verify command until it passes; then commit.",
-    "To commit, `git add` the files (new files included, by path) and `git commit` with a short imperative message, as a command line " +
-      "of their own: `git add <paths> && git commit -m <message>`, nothing else chained, or guardrails refuse it. Nothing may be left " +
-      "uncommitted. The message never mentions Claude, Pi or AI and has no Co-Authored-By line. Do not push or switch branches.",
+    COMMIT,
     ...(t.notes ? [`Your previous attempt failed:\n${t.notes}\nFix that.`] : []),
     ...(t.answer ? [`You asked for more files. The answer: ${t.answer}. Your changes so far are still in the worktree; go on from there.`] : []),
+  ].join("\n\n")
+}
+
+const verifyLine = (t: RunTask) =>
+  `Verify command: ${t.verify}\nRun it exactly as written, with no pipe, redirect or other command added: guardrails refuse any other form.`
+
+const COMMIT =
+  "To commit, `git add` the files (new files included, by path) and `git commit` with a short imperative message, as a command line " +
+  "of their own: `git add <paths> && git commit -m <message>`, nothing else chained, or guardrails refuse it. Nothing may be left " +
+  "uncommitted. The message never mentions Claude, Pi or AI and has no Co-Authored-By line. Do not push or switch branches."
+
+// A finish or acceptance command that did not exit 0.
+export type Failure = { command: string; code: number | null; output: string }
+
+export const showFailures = (fs: Failure[]) => fs.map((f) => `${f.command} (exit ${f.code}):\n${tail(f.output, 2000)}`).join("\n\n")
+
+// The one remediation after a failing finish: a task over the plan's files, its verify the failing commands.
+export function fixTask(run: RunPlan, failures: Failure[]): RunTask {
+  return {
+    id: "!fix", // .pi/worktrees/_fix; plan ids are words like 2.1
+    title: "fix the finish",
+    deps: [],
+    files: [...new Set(run.tasks.flatMap((t) => t.files))],
+    tests: [],
+    role: "large",
+    mode: "direct: remediation",
+    spec: "the failing commands pass",
+    verify: failures.map((f) => f.command).join(" && "),
+    covers: [],
+    status: "running",
+  }
+}
+
+// Only the failures: the fixing agent does not see the plan.
+export function fixPrompt(fix: RunTask, failures: Failure[]): string {
+  return [
+    "Every task of a plan has landed in this git worktree, but these commands fail:",
+    showFailures(failures),
+    "Make the one smallest fix that makes them pass, and nothing else: no refactor, no other change.",
+    `Files you may change: ${fix.files.join(", ")}`,
+    verifyLine(fix),
+    COMMIT,
   ].join("\n\n")
 }
 
