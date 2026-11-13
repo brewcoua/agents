@@ -8,12 +8,13 @@ import { edit } from "../lib/editor.ts"
 import { showList } from "../lib/view.ts"
 import { live } from "../agents/fleet.ts"
 import type { Spawner } from "../agents/runtime.ts"
-import { WORKTREES_DIR, gitIO, killRun } from "./git.ts"
+import { showFinding } from "./findings.ts"
+import { WORKTREES_DIR, git, gitIO, killRun } from "./git.ts"
 import {
   PLANS_DIR, commentsMessage, implementMessage, isSmall, parseComments, parsePlan,
   planPrompt, planStatus, planVerdict, slug, uniqueSlug, withStatus,
 } from "./plan.ts"
-import { type RunPlan, type RunTask, compile, start, summary } from "./run.ts"
+import { type RunPlan, type RunTask, compile, findingTask, start, summary } from "./run.ts"
 import { runPlan } from "./runner.ts"
 import { MAX_SCOUTS, SCOUT, SCOUT_TIMEOUT_MS, formatScouts } from "./scout.ts"
 import { type Model, loadActive, loadProfiles } from "../lib/profiles.ts"
@@ -209,6 +210,7 @@ export default function (pi: ExtensionAPI) {
     }
     // Interrupted tasks start over: whatever they left running is killed, prepare() resets their worktrees.
     start(run)
+    run.base ??= (await git(ctx.cwd, "rev-parse", "HEAD")).trim()
     killRun(ctx.cwd)
     const io = gitIO(ctx.cwd, spawner, save, (m) => {
       ctx.ui.setStatus("tasks", m)
@@ -226,13 +228,23 @@ export default function (pi: ExtensionAPI) {
     current = name
     ctx.ui.notify(`${name}: running. /tasks status shows the tasks, /tasks stop stops them.`, "info")
     void (async () => {
+      let again = false
       try {
         const r = await runPlan(run, tiers.maxConcurrent, io, c.signal)
-        if (r.ok) {
+        ctx.ui.notify(r.message, r.ok ? "info" : "error")
+        // The review's blocker and major findings: each becomes a task of the plan, or is skipped.
+        for (const f of ctx.hasUI ? (r.findings ?? []) : []) {
+          if ((await ctx.ui.select(showFinding(f), ["fix: a new task", "skip"])) !== "fix: a new task") continue
+          run.tasks.push(findingTask(run, f))
+          again = true
+        }
+        if (again) {
+          run.status = "running"
+          save(run)
+        } else if (r.ok) {
           const file = join(ctx.cwd, PLANS_DIR, `${name}.md`)
           writeFileSync(file, withStatus(readFileSync(file, "utf8"), "done"))
         }
-        ctx.ui.notify(r.message, r.ok ? "info" : "error")
       } catch (e) {
         save(run)
         ctx.ui.notify(`/tasks: ${e instanceof Error ? e.message : e}\nThe task file ${PLANS_DIR}/${name}.json holds the state; /tasks run resumes.`, "error")
@@ -241,6 +253,7 @@ export default function (pi: ExtensionAPI) {
         unlock(ctx.cwd, token)
         ctx.ui.setStatus("tasks", undefined)
       }
+      if (again) await execute(name, ctx)
     })()
   }
 

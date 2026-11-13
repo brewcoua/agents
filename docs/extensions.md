@@ -327,7 +327,7 @@ project's full tests. The run goes through these steps:
    has an overlapping file, adds the paths to the task's `files` and its `granted` list, and starts an agent
    again in the same worktree, without a reset, with the answer in its prompt. Otherwise the answer is a refusal
    naming the other task. Nobody is asked. Three requests per task are answered; a fourth ends the attempt.
-3. Check. No model reads the diff: the parent checks that nothing is uncommitted, that there is a commit,
+3. Check. First what needs no model: the parent checks that nothing is uncommitted, that there is a commit,
    that every file in `git diff --name-only <base> HEAD` matches the task's `files`, and re-runs the verify
    command in the worktree. A `tdd` task's prompt names the cycle (red: the tests alone, failing; green: the
    smallest change that passes; refactor), and the check reads it from the commits: there are two at least,
@@ -335,7 +335,10 @@ project's full tests. The run goes through these steps:
    added or one of its files. Test names come from its added lines: `fn <name>`, `def test_<name>`,
    `test("<name>"` and `it("<name>"`. A file name counts so a compiler's error in a test calling a function
    not written yet is a red; a build error elsewhere is not. This holds for cargo, `node --test` and pytest;
-   a runner that prints neither is unchecked. A failure goes back to a fresh worktree and a new agent with the failure as notes.
+   a runner that prints neither is unchecked. Then the judge: a fresh `review` agent on `small`, in the
+   worktree, sees the task's diff, the goal, the spec and the acceptance items it covers, never the task
+   agent's reasoning, and reports findings (below). A `blocker` or `major` fails the attempt.
+   A failure goes back to a fresh worktree and a new agent with the failure as notes.
    Two failures on the task's role give a third attempt on `large`; after that the task is `failed`, the run
    stops, and its worktree stays for you to look at.
 4. Land. The batch's passing tasks land one at a time: the task's branch is rebased onto the current HEAD in
@@ -348,8 +351,23 @@ project's full tests. The run goes through these steps:
    failing commands and their output, may change any file of the plan's tasks, and makes one minimal fix.
    Its verify command is the failing commands joined by `&&`. It is checked and landed as a task is, and the
    commands run again. A second failure stops the run for you, and the fix is not made again: after you fix
-   it, `/tasks run` runs the commands again. Then the plan file is marked `status: done`, and the summary
-   lists the `manual` acceptance items to check by hand.
+   it, `/tasks run` runs the commands again.
+6. Simplify. A `task` agent on `large`, in `.pi/worktrees/_simplify`, gets the build's diff (from the HEAD the
+   run first started at) and the `simplify` skill's rules, and makes the cuts itself, one at a time, running
+   the finish and acceptance commands after each and undoing a cut that breaks them. It makes one commit, or
+   none when there is nothing to cut. It is checked and landed as a task is; a failure is reported, and the
+   run goes on without it.
+7. Review. A `review` agent on `large`, in the project, sees the same diff, the goal, the acceptance and each
+   task's spec. Its `minor` findings go to one agent in `.pi/worktrees/_review` that fixes them, the finish and
+   acceptance commands passing, in one commit. You are asked about each `blocker` and `major`: fix makes it a new
+   task (`r1`, `r2`, ...) after the others, over the finding's file, and the run goes on; skip drops it.
+   Without a UI they are listed. Then the plan file is marked `status: done`, and the summary lists the files
+   with no finding and the `manual` acceptance items to check by hand. Simplify and review run once per plan:
+   a resumed run does not repeat them.
+
+Findings, from the judge and the review, are one line each: `path:line  severity  text  \`quote\``, with
+`blocker`, `major` or `minor`. A finding whose quote is not in its file within three lines of the cited one
+is dropped.
 
 `/tasks run` on a plan that stopped puts `running`, `review` and `failed` tasks back to `pending` with their
 attempts reset, and starts them over: their worktrees are reset to the new base without asking, and recreated

@@ -3,7 +3,7 @@ import { test } from "node:test"
 import { parsePlan } from "../extensions/tasks/plan.ts"
 import {
   type Red, type RunPlan, type RunTask, answer, childPrompt, compile, filesOutside, finishCommand, nextBatch,
-  overlap, redFailure, roleFor, safeId, start, testNames, validate,
+  findingTask, overlap, redFailure, roleFor, safeId, start, testNames, validate,
 } from "../extensions/tasks/run.ts"
 import { type IO, runPlan } from "../extensions/tasks/runner.ts"
 
@@ -149,18 +149,22 @@ test("answer: granted unless a task that may run alongside touches the files", (
 
 // A fake IO: `script` says what each attempt of each task did; `requests` what each child asked for.
 type Attempt = { files?: string[]; uncommitted?: string[]; verify?: number; red?: Red }
-function fake(script: Record<string, Attempt[]>, landError: Record<string, string> = {}, requests: Record<string, string[][]> = {}) {
+// `reviews` what each review says, by task id ("build" for the build's), one per call; none: no findings.
+// A job ("!" id) with no script commits nothing.
+function fake(script: Record<string, Attempt[]>, landError: Record<string, string> = {}, requests: Record<string, string[][]> = {}, reviews: Record<string, string[]> = {}) {
   const calls: string[] = []
   const saved: string[] = []
+  const prompts: Record<string, string[]> = {}
   const used: Record<string, number> = {}
-  const current = (t: RunTask) => script[t.id][used[t.id] - 1]
+  const current = (t: RunTask): Attempt => script[t.id]?.[used[t.id] - 1] ?? (t.id.startsWith("!") ? { files: [] } : {})
   const io: IO = {
     save: (r) => saved.push(r.tasks.map((t) => t.status[0]).join("")),
     log: () => {},
     prepare: async (t) => void calls.push(`prepare ${t.id}`),
-    child: async (t, role) => {
+    child: async (t, role, p) => {
       used[t.id] = (used[t.id] ?? 0) + 1
       calls.push(`child ${t.id} ${role}`)
+      ;(prompts[t.id] ??= []).push(p)
       return { code: 0, output: "" }
     },
     request: async (t) => {
@@ -173,8 +177,16 @@ function fake(script: Record<string, Attempt[]>, landError: Record<string, strin
     land: async (t) => (calls.push(`land ${t.id}`), landError[t.id]),
     remove: async (t) => void calls.push(`remove ${t.id}`),
     finish: async (c) => (calls.push(`finish ${c}`), { code: 0, output: "" }),
+    review: async (t, role, p) => {
+      const key = t?.id ?? "build"
+      ;(prompts[`review ${key}`] ??= []).push(`${role}\n${p}`)
+      return { code: 0, output: reviews[key]?.shift() ?? "No findings." }
+    },
+    diff: async (t, base) => `diff --git a/${t?.id ?? `all-from-${base}`}.txt b/${t?.id ?? `all-from-${base}`}.txt\n+x\n`,
+    read: (_t, path) => (path === "gone.ts" ? undefined : "one\n  bad()\nthree"),
+    skill: (name) => `RULES of ${name}`,
   }
-  return { io, calls, saved }
+  return { io, calls, saved, prompts }
 }
 const ok: Attempt[] = [{}]
 
@@ -184,7 +196,7 @@ test("run: two in parallel, then the one that depends on them, landed in order",
   const { io, calls } = fake({ 1: ok, 2: ok, 3: ok })
   const res = await runPlan(r, 2, io)
   assert.equal(res.ok, true)
-  assert.deepEqual(calls, [
+  assert.deepEqual(calls.filter((c) => !c.includes("!")), [
     "prepare 1", "prepare 2", "child 1 small", "child 2 small", "land 1", "remove 1", "land 2", "remove 2",
     "prepare 3", "child 3 small", "land 3", "remove 3", "finish make test",
   ])
@@ -212,7 +224,7 @@ test("run: failing verify twice escalates to the large role, which can pass", as
   const { io, calls } = fake({ 1: [{ verify: 1 }, { verify: 2 }, {}] })
   const res = await runPlan(r, 1, io)
   assert.equal(res.ok, true)
-  assert.deepEqual(calls.filter((c) => c.startsWith("child")), ["child 1 small", "child 1 small", "child 1 large"])
+  assert.deepEqual(calls.filter((c) => c.startsWith("child 1")), ["child 1 small", "child 1 small", "child 1 large"])
   assert.equal(r.tasks[0].attempts, 2)
   assert.equal(r.tasks[0].notes, undefined)
 })
@@ -254,10 +266,7 @@ function finishing(codes: Record<string, number[]>, fix: Attempt[] = ok) {
   ]
   const fk = fake({ 1: ok, 2: ok, "!fix": fix })
   fk.io.finish = async (c) => (fk.calls.push(`finish ${c}`), { code: codes[c]?.shift() ?? 0, output: `out of ${c}` })
-  const prompts: string[] = []
-  const child = fk.io.child
-  fk.io.child = async (t, role, p) => (prompts.push(p), child(t, role, p))
-  return { r, ...fk, prompts }
+  return { r, ...fk }
 }
 
 test("finish: the finish command and every acceptance command; manual items are listed", async () => {
@@ -273,9 +282,9 @@ test("finish: one remediation gets only the failures, lands, and both run again"
   const { r, io, calls, prompts } = finishing({ "./a1": [1] })
   const res = await runPlan(r, 2, io)
   assert.equal(res.ok, true)
-  const fix = calls.slice(calls.indexOf("finish ./a1") + 1)
+  const fix = calls.slice(calls.indexOf("finish ./a1") + 1, calls.indexOf("finish ./a1") + 7)
   assert.deepEqual(fix, ["prepare !fix", "child !fix large", "land !fix", "remove !fix", "finish make test", "finish ./a1"])
-  const p = prompts.at(-1) ?? ""
+  const p = prompts["!fix"][0]
   assert.match(p, /\.\/a1 \(exit 1\):\nout of \.\/a1/)
   assert.ok(!p.includes("make test") && !p.includes("Goal:"), "only the failing commands")
   assert.equal(r.remediated, true)
@@ -344,5 +353,71 @@ test("run: statuses are saved while the run goes", async () => {
   const r = plan(task("1"))
   const { io, saved } = fake({ 1: ok })
   await runPlan(r, 1, io)
-  assert.deepEqual(saved, ["r", "r", "d", "d"]) // running, review, done, plan done
+  assert.deepEqual(saved, ["r", "r", "d", "d", "d", "d"]) // running, review, done, simplified, reviewed, plan done
+})
+
+const finding = (severity: string, quote = "bad()", path = "src/x.ts") => `${path}:2  ${severity}  it breaks. Fix it.  \`${quote}\``
+
+test("judge: a blocker or major with its quote in the file fails the attempt; minor and unquoted do not", async () => {
+  const r = plan(task("1", { covers: ["a1"] }), task("2"))
+  r.acceptance = [{ id: "a1", kind: "command", text: "./a1" }, { id: "a2", kind: "manual", text: "m" }]
+  const reviews = { 1: [finding("blocker"), [finding("minor"), finding("major", "not there"), finding("major", "bad()", "gone.ts")].join("\n")] }
+  const { io, calls, prompts } = fake({ 1: [{}, {}], 2: ok }, {}, {}, reviews)
+  const res = await runPlan(r, 2, io)
+  assert.equal(res.ok, true)
+  assert.deepEqual(calls.filter((c) => c.startsWith("child 1")), ["child 1 small", "child 1 small"])
+  assert.match(prompts["1"][1], /A review of your diff against the spec found:\nsrc\/x\.ts:2  blocker  it breaks\. Fix it\.  `bad\(\)`/)
+  const judge = prompts["review 1"][0]
+  assert.match(judge, /^small\n/)
+  for (const s of ["Spec: ok", "- a1: `./a1` exits 0", "diff --git a/1.txt"]) assert.ok(judge.includes(s), s)
+  assert.ok(!judge.includes("a2"), "only the acceptance it covers")
+})
+
+test("after finish: simplify, then the review; minor fixed in one job, the rest returned; neither twice", async () => {
+  const r = plan(task("1"))
+  r.base = "b0"
+  r.finish = "make test"
+  const reviews = { build: [[finding("minor"), finding("major", "bad()", "1.txt"), finding("minor", "nope")].join("\n")] }
+  const { io, calls, prompts } = fake({ 1: ok, "!simplify": [{}], "!review": [{}] }, {}, {}, reviews)
+  const res = await runPlan(r, 1, io)
+  assert.equal(res.ok, true)
+  assert.deepEqual(calls.filter((c) => c.includes("!")), [
+    "prepare !simplify", "child !simplify large", "land !simplify", "remove !simplify",
+    "prepare !review", "child !review large", "land !review", "remove !review",
+  ])
+  for (const s of ["RULES of simplify", "diff --git a/all-from-b0.txt", "Verify command: make test"]) assert.ok(prompts["!simplify"][0].includes(s), s)
+  assert.match(prompts["!review"][0], /- src\/x\.ts:2 it breaks\. Fix it\. \(`bad\(\)`\)/)
+  assert.ok(!prompts["!review"][0].includes("nope"), "an unquoted finding is dropped")
+  assert.match(prompts["review build"][0], /^large\nReview the change that built this plan, from b0 to HEAD/)
+  assert.ok(prompts["review build"][0].includes("- 1 t1: ok"), "the tasks are what was asked")
+  assert.deepEqual(res.findings?.map((f) => `${f.path} ${f.severity}`), ["1.txt major"])
+  assert.match(res.message, /Fixed 1 minor finding\./)
+  assert.match(res.message, /Review: 2 findings\. No findings in: all-from-b0\.txt\./)
+  assert.equal(r.simplified && r.reviewed, true)
+
+  // A finding the user chose to fix is a new task; the run goes on without simplify or review again.
+  const f = res.findings?.[0]
+  assert.ok(f)
+  r.tasks.push(findingTask(r, f), findingTask({ ...r, tasks: [...r.tasks, findingTask(r, f)] }, f))
+  assert.deepEqual(r.tasks.slice(1).map((t) => [t.id, t.deps.join(), t.files.join(), t.verify]), [["r1", "", "1.txt", "make test"], ["r2", "r1", "1.txt", "make test"]])
+  assert.match(r.tasks[1].spec, /it breaks\. Fix it\. At 1\.txt:2: `bad\(\)`/)
+  r.status = "running"
+  const again = await runPlan(r, 1, io)
+  assert.equal(again.ok, true)
+  assert.equal(calls.filter((c) => c.startsWith("child !simplify")).length, 1)
+  assert.equal(prompts["review build"].length, 1)
+})
+
+test("after finish: simplify with nothing to cut lands nothing, and one that breaks is reported", async () => {
+  const r = plan(task("1"))
+  const { io, calls } = fake({ 1: ok })
+  const res = await runPlan(r, 1, io)
+  assert.ok(calls.includes("remove !simplify") && !calls.includes("land !simplify"))
+  assert.ok(!res.message.includes("Simplify did not land"))
+
+  const b = plan(task("1"))
+  const broken = fake({ 1: ok, "!simplify": [{ verify: 1 }] })
+  const res2 = await runPlan(b, 1, broken.io)
+  assert.equal(res2.ok, true)
+  assert.match(res2.message, /Simplify did not land: The verify command `true` failed/)
 })

@@ -3,10 +3,10 @@
 import { execFile, spawn } from "node:child_process"
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs"
 import { delimiter, join } from "node:path"
-import { defineTool } from "@earendil-works/pi-coding-agent"
+import { defineTool, parseFrontmatter } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import type { Def } from "../agents/defs.ts"
-import type { Spawner } from "../agents/runtime.ts"
+import type { Owned, Spawner } from "../agents/runtime.ts"
 import type { IO, Output } from "./runner.ts"
 import { type Request, type RunTask, safeId, tail } from "./run.ts"
 
@@ -84,6 +84,12 @@ export function gitIO(cwd: string, spawner: Spawner, save: IO["save"], log: IO["
   // Cargo keeps target/ per worktree; a shared cache would serialise the builds on its lock.
   const sccache: Record<string, string> = onPath("sccache") ? { RUSTC_WRAPPER: "sccache" } : {}
   const tree = (t: RunTask) => treeOf(cwd, safeId(t.id))
+  const dir = (t: RunTask | undefined) => (t ? worktreeDir(cwd, t) : cwd)
+  const agent = async (o: Owned): Promise<Output> => {
+    const a = spawner.spawn(o)
+    await spawner.wait(a)
+    return { code: a.status === "done" ? 0 : 1, output: [a.error && `${a.status}: ${a.error}`, a.result].filter(Boolean).join("\n") }
+  }
   const base = (t: RunTask) => bases.get(t.id) as string
   const requestFiles = (t: RunTask) =>
     defineTool({
@@ -122,15 +128,29 @@ export function gitIO(cwd: string, spawner: Spawner, save: IO["save"], log: IO["
       // -B: a branch left by a worktree the user discarded is reused
       await git(cwd, "worktree", "add", dir, "-B", branch(t), base(t))
     },
-    async child(t, role, prompt) {
-      const a = spawner.spawn({
+    child: (t, role, prompt) =>
+      agent({
         owner: "tasks", def: { ...TASK, role }, prompt, description: `${t.id} ${t.title}`, cwd: worktreeDir(cwd, t),
         tools: [requestFiles(t)], guard: { taskFiles: t.files, taskVerify: t.verify },
         env: { ...sccache, OTHALA_TASK_TREE: tree(t) }, timeoutMs: CHILD_TIMEOUT_MS,
+      }),
+    review(t, role, prompt) {
+      const def = spawner.types().find((d) => d.name === "review")
+      if (!def) throw new Error("the review agent type is missing")
+      return agent({
+        owner: "tasks", def: { ...def, role }, prompt, description: t ? `judge ${t.id} ${t.title}` : "review the build", cwd: dir(t),
+        env: { OTHALA_TASK_TREE: t ? tree(t) : treeOf(cwd, "!review") }, timeoutMs: CHILD_TIMEOUT_MS,
       })
-      await spawner.wait(a)
-      return { code: a.status === "done" ? 0 : 1, output: [a.error && `${a.status}: ${a.error}`, a.result].filter(Boolean).join("\n") }
     },
+    diff: (t, from) => git(dir(t), "diff", "--no-ext-diff", t ? base(t) : (from as string), "HEAD", "--"),
+    read(t, path) {
+      try {
+        return readFileSync(join(dir(t), path), "utf8")
+      } catch {
+        return undefined
+      }
+    },
+    skill: (name) => parseFrontmatter(readFileSync(new URL(`../../skills/${name}/SKILL.md`, import.meta.url), "utf8")).body.trim(),
     async request(t) {
       const r = requests.get(t.id)
       requests.delete(t.id)

@@ -2,8 +2,11 @@
 // with fakes. git.ts is the IO that runs git, the task agents and the verify commands.
 
 import {
-  MAX_ATTEMPTS, MAX_REQUESTS, type Failure, type Red, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, fixPrompt, fixTask, nextBatch, redFailure, safeId, roleFor, showFailures, summary, tail,
+  MAX_ATTEMPTS, MAX_REQUESTS, type Failure, type Red, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, finishCommands,
+  fixPrompt, job, minorPrompt, nextBatch, redFailure, safeId, roleFor, showFailures, simplifyPrompt, summary, tail,
 } from "./run.ts"
+import { type Finding, checkFindings, judgePrompt, parseFindings, reviewPrompt, showFinding, silentFiles } from "./findings.ts"
+import { MAX_DIFF_CHARS, capDiff } from "../simplify/diff.ts"
 import type { Role } from "../lib/profiles.ts"
 
 export type Output = { code: number | null; output: string }
@@ -19,6 +22,28 @@ export type IO = {
   land(t: RunTask): Promise<string | undefined> // an error text, or nothing; all or nothing on HEAD
   remove(t: RunTask): Promise<void>
   finish(command: string): Promise<Output>
+  // The review agent, read-only, in the task's worktree, or the project without one.
+  review(t: RunTask | undefined, role: Role, prompt: string): Promise<Output>
+  diff(t: RunTask | undefined, base?: string): Promise<string> // a task's commits, or the project's since base
+  read(t: RunTask | undefined, path: string): string | undefined
+  skill(name: string): string // a skill's text, for an agent that loads none
+}
+
+const capped = (diff: string) => {
+  const { text, omitted } = capDiff(diff, MAX_DIFF_CHARS)
+  return omitted.length ? `${text}\n(too large to show; read them with git diff: ${omitted.join(", ")})\n` : text
+}
+
+// The review agent's findings whose quotes are in the files.
+async function findings(t: RunTask | undefined, role: Role, prompt: string, io: IO): Promise<Finding[]> {
+  const out = await io.review(t, role, prompt)
+  return checkFindings(parseFindings(out.output), (p) => io.read(t, p)).kept
+}
+
+// JUDGE: after the mechanical checks, a fresh review of the task's diff against its spec.
+async function judge(run: RunPlan, t: RunTask, io: IO): Promise<string | undefined> {
+  const bad = (await findings(t, "small", judgePrompt(run, t, capped(await io.diff(t))), io)).filter((f) => f.severity !== "minor")
+  if (bad.length) return `A review of your diff against the spec found:\n${bad.map(showFinding).join("\n")}\nFix these.`
 }
 
 // CHECK: what the parent can establish without a model. The notes go back to the child.
@@ -52,7 +77,7 @@ async function attempt(run: RunPlan, t: RunTask, io: IO, signal?: AbortSignal): 
     }
     delete t.answer
     if (signal?.aborted) return
-    const failure = await check(t, io, child)
+    const failure = (await check(t, io, child)) ?? (signal?.aborted ? undefined : await judge(run, t, io))
     if (signal?.aborted) return // a killed verify is no failure of the task
     if (!failure) {
       t.status = "review"
@@ -73,9 +98,8 @@ async function attempt(run: RunPlan, t: RunTask, io: IO, signal?: AbortSignal): 
 
 // FINISH: the finish command, then every acceptance command, in the project.
 async function finishFailures(run: RunPlan, io: IO): Promise<Failure[]> {
-  const commands = [...(run.finish ? [run.finish] : []), ...run.acceptance.filter((a) => a.kind === "command").map((a) => a.text)]
   const out: Failure[] = []
-  for (const command of commands) {
+  for (const command of finishCommands(run)) {
     io.log(`finish: ${command}`)
     const f = await io.finish(command)
     if (f.code !== 0) out.push({ command, ...f })
@@ -83,24 +107,24 @@ async function finishFailures(run: RunPlan, io: IO): Promise<Failure[]> {
   return out
 }
 
-// One agent, one attempt, checked and landed as a task is. Returns why it did not land.
-async function remediate(run: RunPlan, failures: Failure[], io: IO, signal?: AbortSignal): Promise<string | undefined> {
-  const fix = fixTask(run, failures)
-  io.log(`finish: one fix for ${failures.map((f) => f.command).join(", ")}`)
-  await io.prepare(fix)
-  const child = await io.child(fix, "large", fixPrompt(fix, failures))
+// One agent, one attempt, checked and landed as a task is. Returns why it did not land; an agent
+// that may find nothing to do (optional) lands nothing without failing.
+async function runJob(t: RunTask, prompt: string, io: IO, signal?: AbortSignal, optional = false): Promise<string | undefined> {
+  io.log(t.title)
+  await io.prepare(t)
+  const child = await io.child(t, "large", prompt)
   if (signal?.aborted) return
-  run.remediated = true
-  io.save(run)
-  const failure = await check(fix, io, child)
-  const kept = `\n  worktree .pi/worktrees/${safeId(fix.id)} kept`
+  const kept = `\n  worktree .pi/worktrees/${safeId(t.id)} kept`
+  const { files, uncommitted } = await io.changed(t)
+  if (optional && !files.length && !uncommitted.length) return void (await io.remove(t))
+  const failure = await check(t, io, child)
   if (failure) return failure + kept
-  const error = await io.land(fix)
+  const error = await io.land(t)
   if (error) return `Landing failed: ${error}${kept}`
-  await io.remove(fix)
+  await io.remove(t)
 }
 
-export async function runPlan(run: RunPlan, maxConcurrent: number, io: IO, signal?: AbortSignal): Promise<{ ok: boolean; message: string }> {
+export async function runPlan(run: RunPlan, maxConcurrent: number, io: IO, signal?: AbortSignal): Promise<{ ok: boolean; message: string; findings?: Finding[] }> {
   let landFailed = false
   for (;;) {
     if (signal?.aborted) return { ok: false, message: `Stopped. /tasks run resumes.\n\n${summary(run)}` }
@@ -138,19 +162,58 @@ export async function runPlan(run: RunPlan, maxConcurrent: number, io: IO, signa
   }
   if (run.tasks.some((t) => t.status !== "done")) return { ok: false, message: `Stopped with tasks that cannot start.\n${summary(run)}` }
 
+  const stopped = { ok: false, message: `Stopped. /tasks run resumes.\n\n${summary(run)}` }
   let failures = await finishFailures(run, io)
   if (failures.length && !run.remediated) {
-    const why = await remediate(run, failures, io, signal)
-    if (signal?.aborted) return { ok: false, message: `Stopped. /tasks run resumes.\n\n${summary(run)}` }
+    const fix = job(run, "!fix", "fix the finish", failures.map((f) => f.command).join(" && "))
+    const why = await runJob(fix, fixPrompt(fix, failures), io, signal)
+    if (signal?.aborted) return stopped
+    run.remediated = true
+    io.save(run)
     failures = await finishFailures(run, io)
     if (failures.length) {
-      const fix = why ? `\nThe fix did not land: ${why}` : ""
-      return { ok: false, message: `Every task landed, but these still fail after one fix:\n${showFailures(failures)}${fix}\nFix them; /tasks run checks again.` }
+      const note = why ? `\nThe fix did not land: ${why}` : ""
+      return { ok: false, message: `Every task landed, but these still fail after one fix:\n${showFailures(failures)}${note}\nFix them; /tasks run checks again.` }
     }
   }
   if (failures.length) return { ok: false, message: `Every task landed, but these fail, and the one fix was made:\n${showFailures(failures)}\nFix them; /tasks run checks again.` }
+  const notes: string[] = []
+  const verify = finishCommands(run).join(" && ") || "true"
+
+  // SIMPLIFY: cuts to the build's diff, the finish commands still passing, in one commit or none.
+  if (!run.simplified) {
+    const t = job(run, "!simplify", "simplify the build", verify)
+    const why = await runJob(t, simplifyPrompt(t, io.skill("simplify"), capped(await io.diff(undefined, run.base))), io, signal, true)
+    if (signal?.aborted) return stopped
+    if (why) notes.push(`Simplify did not land: ${why}`)
+    run.simplified = true
+    io.save(run)
+  }
+
+  // REVIEW: minor findings are fixed in one job; the others go to the user.
+  let open: Finding[] = []
+  if (!run.reviewed) {
+    const diff = await io.diff(undefined, run.base)
+    const kept = await findings(undefined, "large", reviewPrompt(run, capped(diff)), io)
+    if (signal?.aborted) return stopped
+    const minor = kept.filter((f) => f.severity === "minor")
+    if (minor.length) {
+      const t = job(run, "!review", "fix the review's minor findings", verify)
+      const why = await runJob(t, minorPrompt(t, minor), io, signal)
+      if (signal?.aborted) return stopped
+      notes.push(why ? `The minor findings were not fixed: ${why}` : `Fixed ${minor.length} minor finding${minor.length === 1 ? "" : "s"}.`)
+    }
+    open = kept.filter((f) => f.severity !== "minor")
+    const silent = silentFiles([...diff.matchAll(/^diff --git a\/.* b\/(.*)$/gm)].map((m) => m[1]), kept)
+    notes.push(`Review: ${kept.length} finding${kept.length === 1 ? "" : "s"}.${silent.length ? ` No findings in: ${silent.join(", ")}.` : ""}`)
+    if (open.length) notes.push(`To fix or skip:\n${open.map(showFinding).join("\n")}`)
+    run.reviewed = true
+    io.save(run)
+  }
+
   run.status = "done"
   io.save(run)
   const manual = run.acceptance.filter((a) => a.kind === "manual").map((a) => `- ${a.id}: ${a.text}`)
-  return { ok: true, message: summary(run) + (manual.length ? `\n\nCheck by hand:\n${manual.join("\n")}` : "") }
+  if (manual.length) notes.push(`Check by hand:\n${manual.join("\n")}`)
+  return { ok: true, message: [summary(run), ...notes].join("\n\n"), findings: open }
 }

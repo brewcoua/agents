@@ -2,6 +2,7 @@
 // The git and process calls live in git.ts; runner.ts drives them through an injected IO.
 
 import { glob } from "../guardrails/rules.ts"
+import type { Finding } from "./findings.ts"
 import { type Acceptance, type Plan, type Task, sectionOf } from "./plan.ts"
 import type { Role } from "../lib/profiles.ts"
 
@@ -22,7 +23,10 @@ export type RunPlan = {
   decisions: string
   finish?: string // command run once every task has landed
   acceptance: Acceptance[]
+  base?: string // HEAD when the run first started: the build's diff starts there
   remediated?: boolean // the one fix for a failing finish was made
+  simplified?: boolean
+  reviewed?: boolean
   status: "running" | "done"
   tasks: RunTask[]
 }
@@ -207,33 +211,74 @@ export type Failure = { command: string; code: number | null; output: string }
 
 export const showFailures = (fs: Failure[]) => fs.map((f) => `${f.command} (exit ${f.code}):\n${tail(f.output, 2000)}`).join("\n\n")
 
-// The one remediation after a failing finish: a task over the plan's files, its verify the failing commands.
-export function fixTask(run: RunPlan, failures: Failure[]): RunTask {
+// The finish command and the acceptance commands, in that order.
+export const finishCommands = (run: RunPlan) => [...(run.finish ? [run.finish] : []), ...run.acceptance.filter((a) => a.kind === "command").map((a) => a.text)]
+
+// A job after the tasks (the remediation, simplify, the review's minor fixes): one agent over the
+// plan's files, checked and landed as a task is. Its id is no plan task's: "!" becomes "_" in git names.
+export function job(run: RunPlan, id: string, title: string, verify: string): RunTask {
   return {
-    id: "!fix", // .pi/worktrees/_fix; plan ids are words like 2.1
-    title: "fix the finish",
+    id,
+    title,
     deps: [],
     files: [...new Set(run.tasks.flatMap((t) => t.files))],
     tests: [],
     role: "large",
-    mode: "direct: remediation",
-    spec: "the failing commands pass",
-    verify: failures.map((f) => f.command).join(" && "),
+    mode: `direct: ${title}`,
+    spec: title,
+    verify,
     covers: [],
     status: "running",
   }
 }
 
+const jobPrompt = (t: RunTask, ...parts: string[]) => [...parts, `Files you may change: ${t.files.join(", ")}`, verifyLine(t), COMMIT].join("\n\n")
+
 // Only the failures: the fixing agent does not see the plan.
-export function fixPrompt(fix: RunTask, failures: Failure[]): string {
-  return [
+export const fixPrompt = (fix: RunTask, failures: Failure[]) =>
+  jobPrompt(
+    fix,
     "Every task of a plan has landed in this git worktree, but these commands fail:",
     showFailures(failures),
     "Make the one smallest fix that makes them pass, and nothing else: no refactor, no other change.",
-    `Files you may change: ${fix.files.join(", ")}`,
-    verifyLine(fix),
-    COMMIT,
-  ].join("\n\n")
+  )
+
+export const simplifyPrompt = (t: RunTask, rules: string, diff: string) =>
+  jobPrompt(
+    t,
+    "A plan was built in this git worktree; its diff is below. Cut what need not exist, by these rules:",
+    rules,
+    "Apply the cuts yourself, one at a time: after each, run the verify command, and undo the cut if it fails. " +
+      "Change no behaviour. Commit every cut that stays in one commit at the end, or commit nothing when there is nothing to cut.",
+    `\`\`\`diff\n${diff}\`\`\``,
+  )
+
+export const minorPrompt = (t: RunTask, findings: Finding[]) =>
+  jobPrompt(
+    t,
+    "A review of the plan built in this git worktree found these minor problems:",
+    findings.map((f) => `- ${f.path}:${f.line} ${f.text} (\`${f.quote}\`)`).join("\n"),
+    "Fix each, minimally, with the verify command passing. One commit for all of them.",
+  )
+
+// A review finding the user chose to fix: a task of the plan, after the others not done yet, so
+// two fixes of one file never run side by side.
+export function findingTask(run: RunPlan, f: Finding): RunTask {
+  let n = 1
+  while (run.tasks.some((t) => t.id === `r${n}`)) n++
+  return {
+    id: `r${n}`,
+    title: `${f.severity} at ${f.path}:${f.line}`,
+    deps: run.tasks.filter((t) => t.status !== "done").map((t) => t.id),
+    files: [f.path],
+    tests: [],
+    role: "large",
+    mode: "direct: a review finding",
+    spec: `${f.text} At ${f.path}:${f.line}: \`${f.quote}\``,
+    verify: finishCommands(run).join(" && ") || "true",
+    covers: [],
+    status: "pending",
+  }
 }
 
 const tddSteps = (t: RunTask) =>
