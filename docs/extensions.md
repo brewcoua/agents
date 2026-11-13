@@ -1,103 +1,16 @@
-# Pi
+# Extensions
 
-The `pi` module installs [Pi](https://pi.dev), a terminal coding agent, and configures it to make no
-request nobody asked for. It requires `agents-common` and `claude`: Claude reaches Pi through a
-bridge that runs the real `claude` binary.
+The Pi extensions in `extensions/`, loaded from the package's `pi.extensions` list. Each keeps its
+pure logic in files with no Pi imports, tested under `test/` with `node --test`. `extensions/lib/` is
+shared code, not an extension.
 
-```
-modules/tools/pi/
-├── module.json                       # packages, the npm recipe, the pi emitter
-├── home/
-│   ├── .local/bin/pi                 # the wrapper: sets the environment, runs the install
-│   ├── .agents/skills -> ../../../agents-common/home/.claude/skills
-│   └── .pi/agent/
-│       ├── models.json               # ollama
-│       ├── tasks.json                # the model tiers of the tasks extension
-│       ├── extensions/guardrails/    # allow, ask and deny rules; rules.json holds them
-│       ├── extensions/{lsp,memory,btw,simplify,models-discovery,budget,tasks,web}/
-│       ├── extensions/lib/view.ts    # the dashboards' list screen; not an extension
-│       └── AGENTS.md -> ../../../../agents-common/home/.config/agents/AGENTS.md
-├── merge/.pi/agent/settings.json     # only the keys this repository owns
-└── emit/pi/                          # the theme, and its fallback
-```
-
-## Install
-
-`pkg` installs Node, npm, `fd` and `ripgrep` from the distribution (on Fedora `nodejs-npm` and
-`fd-find`). Pi would otherwise download `fd` and `rg` itself. One `npm` recipe then installs Pi
-(`@earendil-works/pi-coding-agent`, which needs Node 22.19 or later), `pi-claude-bridge` and
-`@juicesharp/rpiv-ask-user-question` under `~/.local/share/pi`, so none of it touches the system's
-global npm directory. Nothing is pinned; `othala update` brings the three up to date. npm blocks
-the install scripts of two of Pi's dependencies (`@google/genai`, `protobufjs`); Pi works without
-them.
-
-`@mariozechner/pi-coding-agent` is the deprecated name of the same package. The bridge and the
-question UI do not load on it.
-
-## Offline by default
-
-`~/.local/bin/pi` is a script, not a link to Pi, so the switches hold however Pi is started:
-
-| Variable | Stops |
-|---|---|
-| `PI_OFFLINE=1` | the model catalog refresh, package installs and update checks at start, the `fd` and `rg` download |
-| `PI_SKIP_VERSION_CHECK=1` | the version check |
-| `PI_TELEMETRY=0` | the install report and the provider attribution headers |
-| `DISABLE_TELEMETRY=1`, `DISABLE_ERROR_REPORTING=1` | the same in the Claude Code child the bridge starts |
-
-`enableInstallTelemetry` and `enableAnalytics` are `false` in the settings as well. Because offline
-Pi cannot install packages, the module does, and `packages` lists them as paths. Claude Code gets
-the two `DISABLE_*` variables in its own `settings.json` `env` too, for use outside Pi.
-
-Anything that needs the network is a command you run: `/login`, `/share`, `pi update`, a provider's
-requests.
-
-## Settings
-
-Pi rewrites `~/.pi/agent/settings.json` as it runs: `defaultProvider` and `defaultModel` on
-`/model`, `lastChangelogVersion` on first start, `deviceId` on login. A link into this repository
-would send those writes into `git diff`, so the file is a real file and the module holds
-`merge/.pi/agent/settings.json`. `othala link` sets each key of that file in the real one and
-keeps every other key ([the linker](https://gitlab.com/futharkd/othala/cli/-/blob/master/docs/cli.md#the-linker)).
-The repository holds only:
-
-| Key | Value |
-|---|---|
-| `enableInstallTelemetry`, `enableAnalytics` | `false` |
-| `packages` | the bridge and the question UI, as `~/.local/share/pi/lib/node_modules/...` paths. Pi resolves `~` in a local path, and a local package is never installed or updated by Pi |
-| `skills` | `[]`: the shared skills come from `~/.agents/skills` (below) |
-| `theme` | `othala` |
-| `compaction` | `enabled`; the token thresholds stay at Pi's defaults |
-
-A key you change in the module replaces the whole value on the machine at the next `link`. Edit a
-key it does not name (`/settings`, `/model`) and the change stays. `othala diff` shows a pending
-merge.
-
-## Providers and context
-
-| | |
-|---|---|
-| Claude | `claude auth login`, then `/model` and a `claude-bridge` model. Through the bridge Pi executes the tools; the Claude Code child sees the hooks in `~/.claude/settings.json`, which stays lean for that reason |
-| Codex, Gemini | Pi's own `/login` |
-| ollama | `models.json`: `openai-completions` at `http://localhost:11434/v1`. It lists no model; the models-discovery extension registers what the server has |
-
-`~/.pi/agent/AGENTS.md` is a link to the file `agents-common` shares with opencode and Claude Code,
-so the rules, the commit rule included, apply to Pi. Pi reads `~/.agents/skills` and
-`~/.pi/agent/skills`, not `~/.claude/skills`. `~/.agents/skills` is a link to the skills
-`agents-common` shares, so Pi gets those and nothing else: `~/.claude/skills/synced/` holds the
-claude.ai account skills Claude Code syncs, which name claude.ai tools Pi does not have, and Pi
-searches a skills directory recursively.
-
-Pi has no subagents, plan mode or web access of its own, and no permission prompts; the
-extensions add those (web access is the `web` extension, below). MCP servers go in
-`~/.pi/agent/mcp.json`, which Pi also rewrites from `/mcp`, so the module does not ship one.
+Installing Pi, its settings, providers and theme are the `pi` module's, in othala config
+([`25-pi.md`](https://gitlab.com/futharkd/othala/config/-/blob/master/docs/25-pi.md)).
 
 ## Guardrails
 
-`extensions/guardrails/` is a global Pi extension, loaded from `~/.pi/agent/extensions`. Its rules
-are data in `rules.json`, ported from the `permission` block of opencode's `opencode.json` and from
-its `guardrails.js`. Each table reads general to specific and the last matching rule wins, as in
-opencode. `*` matches anything, slashes included, and a trailing ` *` also matches the bare
+`extensions/guardrails/` holds its rules as data, in `rules.json`. Each table reads general to
+specific and the last matching rule wins. `*` matches anything, slashes included, and a trailing ` *` also matches the bare
 command (`ls *` allows `ls`).
 
 | Table | Decides |
@@ -124,7 +37,7 @@ Denied tools are removed from the active set at `session_start` and `before_agen
 `tool_call` blocks them anyway, because codemode can call a tool that is not active. A tool result
 over `maxOutputChars` keeps its first and last half with a note of how much was cut.
 
-The commit rule is `agents-common`'s section 11, enforced: a `git commit` whose `-m`, `--message`
+The commit rule is section 11 of `AGENTS.md`, enforced: a `git commit` whose `-m`, `--message`
 or `-F` text holds `Co-Authored-By`, "Generated with", `Claude` (any case) or the words `Pi` or
 `AI` is refused. An editor commit, or `-F -`, has no message to read and is allowed. When the
 message sits in a `$(cat <<EOF ...)` the whole command text is scanned instead.
@@ -142,12 +55,7 @@ the task's files, and `git commit`, to which the commit rule still applies. Ever
 the normal rules, and `ask` means deny, since a child has nobody to answer. Bash is otherwise not
 confined by `OTHALA_TASK_FILES`; the land step checks the diff.
 
-The pure logic (`rules.ts`, no Pi imports) is tested by `modules/tools/pi/test/`, which
-`.ci/check.sh` runs with `node --test`.
-
 ## Extensions
-
-The other extensions in `~/.pi/agent/extensions/`, each with its pure logic tested the same way.
 
 ### lsp
 
@@ -170,11 +78,11 @@ Markdown memory that survives sessions, kept the way Claude Code keeps its own: 
 
 ### simplify
 
-`/simplify [ref]` runs `git diff` in the session directory (against `HEAD`, so staged and unstaged changes, or against `ref`) and asks the model to apply the `simplify` skill to it. An empty diff prints a notice and sends nothing. A diff over 60000 characters is cut at file boundaries, and the message names the files left out. Untracked files are not in `git diff`. The skill lives in agents-common (`~/.claude/skills/simplify`), so Claude Code and opencode have it too; it lists cuts and applies none unless asked.
+`/simplify [ref]` runs `git diff` in the session directory (against `HEAD`, so staged and unstaged changes, or against `ref`) and asks the model to apply the `simplify` skill to it. An empty diff prints a notice and sends nothing. A diff over 60000 characters is cut at file boundaries, and the message names the files left out. Untracked files are not in `git diff`. The skill is `skills/simplify`; it lists cuts and applies none unless asked.
 
 ### models-discovery
 
-Lists the models of an OpenAI-compatible server at start-up and registers them with Pi. A provider in `~/.pi/agent/models.json` opts in with `"modelsDiscovery": true`, a key Pi itself ignores; the module's ollama provider does. It calls `GET <baseUrl>/models`, then ollama's `POST /api/show` on the same host for each model, for the context length and the vision and thinking capabilities. Models listed in models.json win over discovered ones. It talks only to the configured host, with a 3 second timeout. With the host down, nothing is added and nothing is printed; `OTHALA_DEBUG=1` says why.
+Lists the models of an OpenAI-compatible server at start-up and registers them with Pi. A provider in `~/.pi/agent/models.json` opts in with `"modelsDiscovery": true`, a key Pi itself ignores; the `pi` module's ollama provider does. It calls `GET <baseUrl>/models`, then ollama's `POST /api/show` on the same host for each model, for the context length and the vision and thinking capabilities. Models listed in models.json win over discovered ones. It talks only to the configured host, with a 3 second timeout. With the host down, nothing is added and nothing is printed; `OTHALA_DEBUG=1` says why.
 
 ### budget
 
@@ -190,7 +98,7 @@ Three tools; none clicks, types or logs in.
 
 | Tool | Does |
 |---|---|
-| `web_search` | Searches through the `searxng` module's local SearXNG ([`26-searxng.md`](26-searxng.md)) and returns title, URL, date and snippet for up to 30 results (default 8). `category` is `general`, `it`, `news` or `science`; `engines` names engines to search instead, including those off by default ([`26-searxng.md`](26-searxng.md#engines)). It names the engines that did not answer, and leaves out results whose URL has no host. Without the module it says how to start it |
+| `web_search` | Searches through the `searxng` module's local SearXNG ([`26-searxng.md`](https://gitlab.com/futharkd/othala/config/-/blob/master/docs/26-searxng.md)) and returns title, URL, date and snippet for up to 30 results (default 8). `category` is `general`, `it`, `news` or `science`; `engines` names engines to search instead, including those off by default ([`26-searxng.md`](https://gitlab.com/futharkd/othala/config/-/blob/master/docs/26-searxng.md#engines)). It names the engines that did not answer, and leaves out results whose URL has no host. Without the module it says how to start it |
 | `web_fetch` | Fetches an `http(s)` URL. HTML comes back as Markdown-like text, the `<main>` or `<article>` only when the page has one; text, JSON and XML as they are; anything else (a PDF, an image) is saved under `/tmp/pi-web-*/` and its path returned, for the `documents` skill; that directory is deleted when the session ends. A body over 50 MB is refused. Text comes in windows of 20000 characters, and the result gives the `offset` to read on |
 | `web_render` | Loads the URL in headless chromium, runs its JavaScript for up to 10 seconds of page time, and returns the text the same way, or with `screenshot` a PNG of the viewport (default 1280 by 1600). Registered only when `chromium` (or Fedora's `chromium-browser`) is on PATH; the `searxng` module installs it |
 
@@ -206,7 +114,7 @@ child `pi`. Planning and review come first; a small change is implemented in the
 ### Tiers
 
 `~/.pi/agent/tasks.json` names three models as `provider/model` and a concurrency for the task runner.
-Pi never rewrites the file, so it is a link and not part of `settings.json`:
+The `pi` module ships it; Pi never rewrites the file:
 
 ```json
 { "plan": "claude-bridge/claude-opus-5-5", "large": "claude-bridge/claude-sonnet-5-5",
@@ -227,8 +135,8 @@ researches with `read`, `grep`, `find`, `ls` and `scout`, and writes `.pi/plans/
 `scout` takes up to 6 questions and runs one child `pi` per question, in parallel, on the `small`
 model: print mode, `--no-session`, only `read`, `grep`, `find`, `ls`, no MCP, and `-na`, so a
 project's own extensions and settings are not loaded. Each has 180 seconds and its answer is cut at
-8000 characters; a failed scout reports its error. The child is the `pi` on PATH, the wrapper, so it
-stays offline.
+8000 characters; a failed scout reports its error. The child is the `pi` on PATH, the `pi` module's
+wrapper, so it stays offline.
 
 `/plan cancel` leaves plan mode without approving. Leaving restores the model you were using. Plan mode
 survives a resume.
@@ -335,16 +243,5 @@ moments it runs:
 | `/tasks run` | whatever an earlier run left, before it starts |
 | A child passes 30 minutes | that task's processes |
 
-## Theme
-
-The `pi` emitter writes `~/.pi/agent/themes/othala.json` from the colour roles, with all 51
-colours Pi requires and the `appearance` of the active scheme. Pi hot-reloads the active user theme,
-so a preset switch repaints a running Pi. Until a preset is applied the file is the default
-preset's rendering ([fallback outputs](https://gitlab.com/futharkd/othala/cli/-/blob/master/docs/cli.md#the-linker)); JSON has no comments, so
-it carries no header. `pi` is a hybrid application in SPECS.md §2.2, with the settings selecting the
-theme by name.
-
-## Git
-
-`.pi/plans/` and `.pi/worktrees/` are in the `git` module's global ignore, so no project's
+`.pi/plans/` and `.pi/worktrees/` are in the `git` module's global ignore in config, so no project's
 `.gitignore` changes.
