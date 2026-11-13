@@ -1,7 +1,9 @@
 // The scheduler: steps 4 to 7 of the workflow over an injected IO, so node --test drives it
 // with fakes. git.ts is the IO that runs git and the child pi processes.
 
-import { MAX_ATTEMPTS, type RunPlan, type RunTask, childPrompt, filesOutside, nextBatch, safeId, summary, tail, tierFor } from "./run.ts"
+import {
+  MAX_ATTEMPTS, MAX_REQUESTS, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, nextBatch, safeId, summary, tail, tierFor,
+} from "./run.ts"
 import type { Tier } from "./tiers.ts"
 
 export type Output = { code: number | null; output: string }
@@ -10,9 +12,10 @@ export type IO = {
   log(message: string): void
   prepare(t: RunTask): Promise<void> // the task's worktree at the current HEAD, empty
   child(t: RunTask, tier: Tier, prompt: string): Promise<Output>
+  request(t: RunTask): Promise<Request | undefined> // what the child asked for with request_files, taken once
   changed(t: RunTask): Promise<{ files: string[]; uncommitted: string[] }> // against the base commit
   verify(t: RunTask): Promise<Output>
-  land(t: RunTask): Promise<string | undefined> // an error text, or nothing
+  land(t: RunTask): Promise<string | undefined> // an error text, or nothing; all or nothing on HEAD
   remove(t: RunTask): Promise<void>
   finish(command: string): Promise<Output>
 }
@@ -29,12 +32,25 @@ async function check(t: RunTask, io: IO, child: Output): Promise<string | undefi
   return undefined
 }
 
-async function attempt(run: RunPlan, t: RunTask, io: IO): Promise<void> {
+// On a stop the task is left running: start() puts it back to pending on the next run.
+async function attempt(run: RunPlan, t: RunTask, io: IO, signal?: AbortSignal): Promise<void> {
   for (;;) {
+    if (signal?.aborted) return
     const tier = tierFor(t)
     io.log(`task ${t.id}: attempt ${(t.attempts ?? 0) + 1} on the ${tier} tier`)
-    const child = await io.child(t, tier, childPrompt(run, t))
+    let child = await io.child(t, tier, childPrompt(run, t))
+    // A request is answered and the child started again in the same worktree, without a reset.
+    for (let req = await io.request(t); req && !signal?.aborted; req = await io.request(t)) {
+      t.answer = answer(run, t, req)
+      io.log(`task ${t.id} asked for ${req.files.join(", ")} (${req.reason}): ${t.answer}`)
+      io.save(run)
+      if ((t.requests ?? 0) > MAX_REQUESTS) break // one request too many: checked as it stands
+      child = await io.child(t, tier, childPrompt(run, t))
+    }
+    delete t.answer
+    if (signal?.aborted) return
     const failure = await check(t, io, child)
+    if (signal?.aborted) return // a killed verify is no failure of the task
     if (!failure) {
       t.status = "review"
       delete t.notes
@@ -46,23 +62,26 @@ async function attempt(run: RunPlan, t: RunTask, io: IO): Promise<void> {
       t.status = "failed"
       return io.save(run)
     }
+    delete t.requests // the next attempt starts from a clean worktree, and may ask again
     io.save(run)
     await io.prepare(t)
   }
 }
 
-export async function runPlan(run: RunPlan, maxConcurrent: number, io: IO): Promise<{ ok: boolean; message: string }> {
+export async function runPlan(run: RunPlan, maxConcurrent: number, io: IO, signal?: AbortSignal): Promise<{ ok: boolean; message: string }> {
   let landFailed = false
   for (;;) {
+    if (signal?.aborted) return { ok: false, message: `Stopped. /tasks run resumes.\n\n${summary(run)}` }
     const batch = nextBatch(run, maxConcurrent)
     if (!batch.length) break
     for (const t of batch) t.status = "running"
     io.save(run)
     io.log(`running ${batch.map((t) => t.id).join(", ")}`)
     for (const t of batch) await io.prepare(t) // one at a time: git locks the repository while it adds
-    await Promise.all(batch.map((t) => attempt(run, t, io)))
+    await Promise.all(batch.map((t) => attempt(run, t, io, signal)))
 
-    // LAND: one task at a time. The batch is unordered, so the plan's order is a dependency order.
+    // LAND: one task at a time, even after a stop, since landing is quick. The batch is unordered,
+    // so the plan's order is a dependency order.
     for (const t of batch.filter((t) => t.status === "review")) {
       const error = await io.land(t)
       if (error) {

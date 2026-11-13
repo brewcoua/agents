@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { basename, join } from "node:path"
 import { Type } from "typebox"
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import rules from "../guardrails/rules.json"
 import type { Rules } from "../guardrails/rules.ts"
-import { gitIO, leftovers, worktreeDir } from "./git.ts"
+import { WORKTREES_DIR, gitIO, killRun } from "./git.ts"
 import {
   PLANS_DIR, commentsMessage, implementMessage, isSmall, parseComments, parsePlan,
   planPrompt, planStatus, planVerdict, slug, uniqueSlug, withStatus,
@@ -24,7 +24,32 @@ const ENTRY = "tasks-plan"
 
 const loadTiers = () => parseTiers(readFileSync(join(getAgentDir(), "tasks.json"), "utf8"))
 
+// Set in a task's child pi (run.ts, childEnv).
+const REQUEST = process.env.OTHALA_TASK_REQUEST
+
+// One run per project: worktrees and branches are named by task id alone. The lock holds the pid
+// and a token per extension instance: after /new or /reload the old instance's run may still be
+// landing in this same process.
+const lockFile = (cwd: string) => join(cwd, WORKTREES_DIR, "run.lock")
+function holder(cwd: string, token: string): string | undefined {
+  try {
+    const lock = readFileSync(lockFile(cwd), "utf8")
+    if (lock === token) return undefined
+    // a pid reused by something else is no holder
+    if (!readFileSync(`/proc/${Number(lock.split(" ")[0])}/cmdline`, "latin1").includes("pi")) return undefined
+    return lock.split(" ")[0]
+  } catch {
+    return undefined
+  }
+}
+const unlock = (cwd: string, token: string) => {
+  try {
+    if (readFileSync(lockFile(cwd), "utf8") === token) rmSync(lockFile(cwd))
+  } catch {}
+}
+
 export default function (pi: ExtensionAPI) {
+  const token = `${process.pid} ${Math.random().toString(36).slice(2)}`
   let state: State | undefined
 
   const save = (s: State | undefined) => {
@@ -37,6 +62,17 @@ export default function (pi: ExtensionAPI) {
     state = last?.data ?? undefined
     ctx.ui.setStatus("plan", state ? "plan mode" : undefined)
     if (state) pi.setActiveTools([...new Set([...pi.getActiveTools(), "scout"])])
+    // A Pi killed during a run leaves the processes its children started; nobody else will stop them.
+    if (!REQUEST && existsSync(join(ctx.cwd, WORKTREES_DIR)) && !holder(ctx.cwd, token)) {
+      const n = killRun(ctx.cwd)
+      if (n) ctx.ui.notify(`/tasks: stopped ${n} processes left by an interrupted run. /tasks run resumes it.`, "warning")
+    }
+  })
+
+  pi.on("session_shutdown", (_e, ctx) => {
+    if (!controller) return
+    controller.abort()
+    killRun(ctx.cwd)
   })
 
   // Prepended to each request instead of stored, as the memory extension does: the
@@ -152,11 +188,14 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify(names.length ? `Several plans are open; name one: ${names.join(", ")}` : "No approved plan is waiting.", "warning")
   }
 
-  let running = false
+  let controller: AbortController | undefined
 
-  // COMPILE (first time), then EXECUTE to FINISH; a task tree on disk is resumed.
+  // COMPILE (first time), then EXECUTE to FINISH; a task tree on disk is resumed. The run goes on
+  // in the background, so the session stays usable and /tasks stop can reach it.
   async function execute(name: string, ctx: ExtensionCommandContext) {
-    if (running) return ctx.ui.notify("Tasks are already running.", "warning")
+    if (controller) return ctx.ui.notify("Tasks are already running. /tasks stop stops them.", "warning")
+    const other = holder(ctx.cwd, token)
+    if (other) return ctx.ui.notify(`Tasks are running in another Pi in this project (pid ${other}).`, "warning")
     const save = saveRun(ctx)
     let run = loadRun(ctx, name)
     if (!run) {
@@ -176,35 +215,47 @@ export default function (pi: ExtensionAPI) {
     } catch (e) {
       return ctx.ui.notify(`/tasks: ${e instanceof Error ? e.message : e}`, "error")
     }
+    // Interrupted tasks start over: whatever they left running is killed, prepare() resets their worktrees.
     start(run)
-    const left = leftovers(ctx.cwd, run)
+    killRun(ctx.cwd)
     const io = gitIO(ctx.cwd, tiers, save, (m) => {
       ctx.ui.setStatus("tasks", m)
       if (!ctx.hasUI) ctx.ui.notify(m, "info")
     })
-    if (left.length) {
-      const list = left.map((t) => `${t.id}: ${worktreeDir(ctx.cwd, t)}`).join("\n")
-      if (!(ctx.hasUI && (await ctx.ui.confirm("Unfinished worktrees", `These tasks were interrupted and their worktrees remain:\n${list}\n\nDiscard them and run the tasks again?`)))) {
-        return ctx.ui.notify(`Interrupted worktrees remain; nothing was deleted:\n${list}\nRemove them with git worktree remove --force and git branch -D, then /tasks run again.`, "warning")
-      }
-      for (const t of left) await io.remove(t)
-    }
     save(run)
-    running = true
+    mkdirSync(join(ctx.cwd, WORKTREES_DIR), { recursive: true })
     try {
-      const r = await runPlan(run, tiers.maxConcurrent, io)
-      if (r.ok) {
-        const file = join(ctx.cwd, PLANS_DIR, `${name}.md`)
-        writeFileSync(file, withStatus(readFileSync(file, "utf8"), "done"))
-      }
-      ctx.ui.notify(r.message, r.ok ? "info" : "error")
-    } catch (e) {
-      save(run)
-      ctx.ui.notify(`/tasks: ${e instanceof Error ? e.message : e}\nThe task file ${PLANS_DIR}/${name}.json holds the state; /tasks run resumes.`, "error")
-    } finally {
-      running = false
-      ctx.ui.setStatus("tasks", undefined)
+      writeFileSync(lockFile(ctx.cwd), token, { flag: "wx" })
+    } catch {
+      if (holder(ctx.cwd, token)) return ctx.ui.notify("Another Pi took this project's tasks just now.", "warning")
+      writeFileSync(lockFile(ctx.cwd), token) // stale
     }
+    const c = (controller = new AbortController())
+    ctx.ui.notify(`${name}: running. /tasks status shows the tasks, /tasks stop stops them.`, "info")
+    void (async () => {
+      try {
+        const r = await runPlan(run, tiers.maxConcurrent, io, c.signal)
+        if (r.ok) {
+          const file = join(ctx.cwd, PLANS_DIR, `${name}.md`)
+          writeFileSync(file, withStatus(readFileSync(file, "utf8"), "done"))
+        }
+        ctx.ui.notify(r.message, r.ok ? "info" : "error")
+      } catch (e) {
+        save(run)
+        ctx.ui.notify(`/tasks: ${e instanceof Error ? e.message : e}\nThe task file ${PLANS_DIR}/${name}.json holds the state; /tasks run resumes.`, "error")
+      } finally {
+        if (controller === c) controller = undefined
+        unlock(ctx.cwd, token)
+        ctx.ui.setStatus("tasks", undefined)
+      }
+    })()
+  }
+
+  function stop(ctx: ExtensionCommandContext) {
+    if (!controller) return ctx.ui.notify("No tasks are running.", "info")
+    controller.abort()
+    const n = killRun(ctx.cwd)
+    ctx.ui.notify(`Stopping: ${n} processes killed. Tasks that already passed their checks still land; /tasks run resumes the rest.`, "info")
   }
 
   async function approve(ctx: ExtensionCommandContext) {
@@ -228,10 +279,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("tasks", {
-    description: "Run an approved plan's tasks in worktrees: /tasks run [slug] (also resumes), /tasks status [slug]",
+    description: "Run an approved plan's tasks in worktrees: /tasks run [slug] (also resumes), /tasks status [slug], /tasks stop",
     handler: async (args, ctx) => {
       const [sub, arg = ""] = args.trim().split(/\s+/)
-      if (sub !== "run" && sub !== "status") return ctx.ui.notify("usage: /tasks run [slug] | /tasks status [slug]", "info")
+      if (sub === "stop") return stop(ctx)
+      if (sub !== "run" && sub !== "status") return ctx.ui.notify("usage: /tasks run [slug] | /tasks status [slug] | /tasks stop", "info")
       const name = pick(arg, ctx)
       if (!name) return
       if (sub === "run") return execute(name, ctx)
@@ -251,6 +303,24 @@ export default function (pi: ExtensionAPI) {
       await enter(a, ctx)
     },
   })
+
+  if (REQUEST) {
+    pi.registerTool({
+      name: "request_files",
+      label: "Request files",
+      description:
+        "Ask the task runner for permission to change files outside this task's files, with the reason. " +
+        "Then end your turn: you are started again with the answer, and your changes so far are kept.",
+      parameters: Type.Object({
+        files: Type.Array(Type.String(), { minItems: 1, description: "Paths or globs, relative to the project" }),
+        reason: Type.String({ description: "Why the task cannot be done without them" }),
+      }),
+      async execute(_id, p) {
+        writeFileSync(REQUEST, JSON.stringify(p))
+        return { content: [{ type: "text" as const, text: "Sent. End your turn now; you are started again with the answer." }], details: {} }
+      },
+    })
+  }
 
   pi.registerTool({
     name: "scout",

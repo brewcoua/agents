@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { parsePlan } from "../home/.pi/agent/extensions/tasks/plan.ts"
 import {
-  type RunPlan, type RunTask, childArgs, childEnv, childPrompt, compile, filesOutside, finishCommand, nextBatch,
+  type RunPlan, type RunTask, answer, childArgs, childEnv, childPrompt, compile, filesOutside, finishCommand, nextBatch,
   overlap, safeId, start, tierFor, validate,
 } from "../home/.pi/agent/extensions/tasks/run.ts"
 import { type IO, runPlan } from "../home/.pi/agent/extensions/tasks/runner.ts"
@@ -106,18 +106,31 @@ test("files check", () => {
 test("child arguments, environment, prompt", () => {
   const t = task("1", { files: ["a.rs", "b/*.rs"], verify: "cargo test", notes: "it broke" })
   assert.deepEqual(childArgs({ provider: "p", id: "m" }, "do it"), ["-p", "--no-session", "--no-mcp", "-na", "--provider", "p", "--model", "m", "do it"])
-  const env = childEnv(t, { PATH: "/bin" }, true)
+  const env = childEnv(t, { PATH: "/bin" }, true, "/w/.pi/worktrees/1.request.json")
   assert.equal(env.OTHALA_TASK_FILES, "a.rs:b/*.rs")
+  assert.equal(env.OTHALA_TASK_REQUEST, "/w/.pi/worktrees/1.request.json")
   assert.equal(env.OTHALA_TASK_VERIFY, "cargo test")
   assert.equal(env.RUSTC_WRAPPER, "sccache")
-  assert.equal(childEnv(t, {}, false).RUSTC_WRAPPER, undefined)
+  assert.equal(childEnv(t, {}, false, "r").RUSTC_WRAPPER, undefined)
   const p = childPrompt(plan(t), t)
-  for (const s of ["Goal: g", "- d", "Task 1: t1", "a.rs, b/*.rs", "cargo test", "it broke"]) assert.ok(p.includes(s), s)
+  for (const s of ["Goal: g", "- d", "Task 1: t1", "a.rs, b/*.rs", "cargo test", "it broke", "request_files"]) assert.ok(p.includes(s), s)
+  assert.ok(childPrompt(plan(t), { ...t, answer: "granted: x" }).includes("The answer: granted: x"))
 })
 
-// A fake IO: `script` says what each attempt of each task did.
+test("answer: granted unless a task that may run alongside touches the files", () => {
+  const r = plan(task("1"), task("2", { files: ["b/*.rs"] }), task("3", { deps: ["1"], files: ["c.rs"] }), task("4", { status: "done", files: ["d.rs"] }))
+  const t = r.tasks[0]
+  assert.match(answer(r, t, { files: ["b/x.rs"], reason: "r" }), /refused: b\/x\.rs belongs to task 2/)
+  assert.match(answer(r, t, { files: ["c.rs", "d.rs", "e.rs"], reason: "r" }), /^granted/) // 3 waits for 1, 4 is done
+  assert.deepEqual(t.files, ["1.txt", "c.rs", "d.rs", "e.rs"])
+  assert.deepEqual(t.granted, [{ files: ["c.rs", "d.rs", "e.rs"], reason: "r" }])
+  assert.match(answer(r, t, { files: ["../x"], reason: "r" }), /refused: give paths relative/)
+  assert.match(answer(r, t, { files: ["f.rs"], reason: "r" }), /refused: this task already asked 3 times/)
+})
+
+// A fake IO: `script` says what each attempt of each task did; `requests` what each child asked for.
 type Attempt = { files?: string[]; uncommitted?: string[]; verify?: number }
-function fake(script: Record<string, Attempt[]>, landError: Record<string, string> = {}) {
+function fake(script: Record<string, Attempt[]>, landError: Record<string, string> = {}, requests: Record<string, string[][]> = {}) {
   const calls: string[] = []
   const saved: string[] = []
   const used: Record<string, number> = {}
@@ -130,6 +143,10 @@ function fake(script: Record<string, Attempt[]>, landError: Record<string, strin
       used[t.id] = (used[t.id] ?? 0) + 1
       calls.push(`child ${t.id} ${tier}`)
       return { code: 0, output: "" }
+    },
+    request: async (t) => {
+      const files = requests[t.id]?.shift()
+      return files && { files, reason: "needed" }
     },
     changed: async (t) => ({ files: current(t).files ?? t.files, uncommitted: current(t).uncommitted ?? [] }),
     verify: async (t) => ({ code: current(t).verify ?? 0, output: `output of ${t.id}` }),
@@ -203,6 +220,44 @@ test("run: a failed landing stops the run; failed finish keeps the plan open", a
   assert.equal(b.ok, false)
   assert.equal(f.status, "running")
   assert.match(b.message, /make test` failed \(exit 2\)/)
+})
+
+test("run: a request is answered and the child goes on without a reset", async () => {
+  const r = plan(task("1"), task("2", { files: ["2.txt", "shared.txt"] }))
+  const { io, calls } = fake({ 1: [{}, {}, { files: ["1.txt", "x.txt"] }], 2: ok }, {}, { 1: [["x.txt"], ["shared.txt"]] }) // one entry per child run
+  const res = await runPlan(r, 2, io)
+  assert.equal(res.ok, true)
+  assert.deepEqual(calls.filter((c) => c.includes(" 1")), ["prepare 1", "child 1 small", "child 1 small", "child 1 small", "land 1", "remove 1"])
+  assert.deepEqual(r.tasks[0].files, ["1.txt", "x.txt"]) // shared.txt was refused: task 2 runs alongside
+  assert.equal(r.tasks[0].answer, undefined)
+})
+
+test("run: a stop leaves tasks running, lands those that passed, and starts nothing new", async () => {
+  const c = new AbortController()
+  const r = plan(task("1"), task("2"), task("3", { deps: ["1"] }))
+  const { io, calls } = fake({ 1: ok, 2: ok, 3: ok })
+  const child = io.child
+  io.child = async (t, tier, p) => {
+    const o = await child(t, tier, p)
+    if (t.id === "2") await new Promise((done) => setTimeout(done, 20)), c.abort() // after task 1 passed
+    return { ...o, code: t.id === "2" ? null : 0 }
+  }
+  const res = await runPlan(r, 2, io, c.signal)
+  assert.equal(res.ok, false)
+  assert.match(res.message, /^Stopped\. \/tasks run resumes/)
+  assert.deepEqual(r.tasks.map((t) => t.status), ["done", "running", "pending"])
+  assert.ok(!calls.includes("child 3 small"))
+})
+
+test("run: a stop that kills verify is no failed attempt", async () => {
+  const c = new AbortController()
+  const r = plan(task("1"))
+  const { io } = fake({ 1: ok })
+  io.verify = async () => (c.abort(), { code: null, output: "" })
+  await runPlan(r, 1, io, c.signal)
+  assert.equal(r.tasks[0].status, "running")
+  assert.equal(r.tasks[0].attempts, undefined)
+  assert.equal(r.tasks[0].notes, undefined)
 })
 
 test("run: statuses are saved while the run goes", async () => {

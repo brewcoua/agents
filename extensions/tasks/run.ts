@@ -6,7 +6,15 @@ import type { Plan, Task } from "./plan.ts"
 import type { Model, Tier, Tiers } from "./tiers.ts"
 
 export type Status = "pending" | "running" | "review" | "done" | "failed"
-export type RunTask = Task & { status: Status; attempts?: number; notes?: string }
+export type Request = { files: string[]; reason: string } // a child asking for more files
+export type RunTask = Task & {
+  status: Status
+  attempts?: number
+  notes?: string // why the last attempt failed
+  answer?: string // the runner's answer to the child's last request
+  requests?: number
+  granted?: Request[]
+}
 export type RunPlan = {
   slug: string
   title: string
@@ -18,6 +26,7 @@ export type RunPlan = {
 }
 
 export const MAX_ATTEMPTS = 3
+export const MAX_REQUESTS = 3
 
 const section = (text: string, name: string) =>
   new RegExp(`^## ${name}[ \\t]*$([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, "m").exec(text)?.[1].trim() ?? ""
@@ -45,7 +54,7 @@ export function overlap(a: string, b: string): boolean {
 }
 
 // Every task a task depends on, directly or not. A cycle is reported instead.
-function ancestors(tasks: Task[]): { all: Map<string, Set<string>>; cycle?: string } {
+export function ancestors(tasks: Task[]): { all: Map<string, Set<string>>; cycle?: string } {
   const byId = new Map(tasks.map((t) => [t.id, t]))
   const all = new Map<string, Set<string>>()
   const visiting = new Set<string>()
@@ -105,11 +114,13 @@ export function compile(plan: Plan, text: string, slug: string): { run?: RunPlan
 }
 
 // Resume after an interruption, or after a failure the user dealt with. Returns the tasks
-// put back to pending; their worktrees may still exist and are the caller's to show.
+// put back to pending; prepare() resets their worktrees. Files granted earlier stay granted.
 export function start(run: RunPlan): RunTask[] {
   const back = run.tasks.filter((t) => t.status === "running" || t.status === "review" || t.status === "failed")
   for (const t of back) {
     delete t.attempts
+    delete t.requests
+    delete t.answer
     t.status = "pending"
   }
   return back
@@ -124,6 +135,25 @@ export function nextBatch(run: RunPlan, max: number): RunTask[] {
 // Two failed attempts on the task's own tier, then the large one.
 export const tierFor = (t: RunTask): Tier => ((t.attempts ?? 0) >= 2 ? "large" : t.tier)
 
+// A request is granted when no task that may run at the same time touches the files, so the
+// tasks of a batch stay disjoint; the parent decides, and nobody is asked.
+export function answer(run: RunPlan, t: RunTask, req: Request): string {
+  t.requests = (t.requests ?? 0) + 1
+  if (t.requests > MAX_REQUESTS) return `refused: this task already asked ${MAX_REQUESTS} times; finish within its files, or make no commit and say why`
+  const bad = req.files.filter((f) => !f || f.startsWith("/") || f.split("/").includes(".."))
+  if (!req.files.length || bad.length) return `refused: give paths relative to the project, without ..${bad.length ? ` (${bad.join(", ")})` : ""}`
+  const { all } = ancestors(run.tasks)
+  const ordered = (o: RunTask) => all.get(t.id)?.has(o.id) || all.get(o.id)?.has(t.id)
+  for (const o of run.tasks) {
+    if (o.id === t.id || o.status === "done" || ordered(o)) continue
+    const f = req.files.find((x) => o.files.some((y) => overlap(x, y)))
+    if (f) return `refused: ${f} belongs to task ${o.id}, which may run at the same time; do without it, or make no commit and say why`
+  }
+  t.files.push(...req.files.filter((f) => !t.files.includes(f)))
+  t.granted = [...(t.granted ?? []), req]
+  return `granted: you may now change ${req.files.join(", ")}`
+}
+
 export const filesOutside = (changed: string[], globs: string[]) => changed.filter((f) => !globs.some((g) => glob(g, f)))
 
 export function childPrompt(run: RunPlan, t: RunTask): string {
@@ -132,10 +162,13 @@ export function childPrompt(run: RunPlan, t: RunTask): string {
     `Plan: ${run.title}\nGoal: ${run.goal}${run.decisions ? `\nDecisions:\n${run.decisions}` : ""}`,
     `Task ${t.id}: ${t.title}\nAccept: ${t.accept}\nFiles you may change: ${t.files.join(", ")}`,
     `Verify command: ${t.verify}`,
+    "If the task cannot be done without changing a file outside these, call request_files with the paths and the reason, " +
+      "then end your turn; you are started again with the answer, and your changes so far stay in the worktree.",
     "Steps: make the change; run the verify command exactly as written until it passes; then `git add` the files you changed " +
       "(new files included, by path) and `git commit` with a short imperative message. Nothing may be left uncommitted. " +
       "The message never mentions Claude, Pi or AI and has no Co-Authored-By line. Do not push or switch branches.",
     ...(t.notes ? [`Your previous attempt failed:\n${t.notes}\nFix that.`] : []),
+    ...(t.answer ? [`You asked for more files. The answer: ${t.answer}. Your changes so far are still in the worktree; go on from there.`] : []),
   ].join("\n\n")
 }
 
@@ -145,11 +178,13 @@ export function childArgs(model: Model, prompt: string): string[] {
   return ["-p", "--no-session", "--no-mcp", "-na", "--provider", model.provider, "--model", model.id, prompt]
 }
 
-export function childEnv(t: RunTask, env: NodeJS.ProcessEnv, sccache: boolean): NodeJS.ProcessEnv {
+// OTHALA_TASK_REQUEST: where the child's request_files writes its request.
+export function childEnv(t: RunTask, env: NodeJS.ProcessEnv, sccache: boolean, request: string): NodeJS.ProcessEnv {
   return {
     ...env,
     OTHALA_TASK_FILES: t.files.join(":"),
     OTHALA_TASK_VERIFY: t.verify,
+    OTHALA_TASK_REQUEST: request,
     // Cargo keeps target/ per worktree; a shared cache would serialise the builds on its lock.
     ...(sccache ? { RUSTC_WRAPPER: "sccache" } : {}),
   }
