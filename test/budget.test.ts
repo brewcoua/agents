@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { type Limits, addOther, check, fresh, num, own, readReport, record, status, summary } from "../extensions/budget/limits.ts"
+import { type Limits, addOther, check, fresh, num, own, record, status, summary } from "../extensions/budget/limits.ts"
 
 const L: Limits = { usd: 2, tokens: 1000 }
 
@@ -72,11 +72,4 @@ test("status line", () => {
   record(t, "b", 0.5, 1_000_000)
   assert.equal(status(t, { usd: 2, tokens: 5_000_000 }), "budget 32% · 1.6M/5M tok · $0.50/$2.00")
   assert.equal(status(t, { usd: 0, tokens: 0 }), "budget 0%")
-})
-
-test("child report file", () => {
-  assert.deepEqual(readReport('{"cost":0.1,"tokens":5}'), { cost: 0.1, tokens: 5 })
-  assert.equal(readReport(undefined), undefined)
-  assert.equal(readReport("{"), undefined)
-  assert.equal(readReport('{"cost":"x","tokens":5}'), undefined)
 })

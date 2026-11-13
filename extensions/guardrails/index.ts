@@ -7,11 +7,6 @@ import { type Env, type Rules, cap, decide, toolVerdict } from "./rules.ts"
 
 const R = rules as Rules
 
-// The tasks extension sets this in a task's child pi: a ":"-separated list of globs, relative to
-// the project directory. Edit and write outside them are refused, and nothing asks. OTHALA_TASK_VERIFY
-// is the one bash command the task may run besides `git add` of its files and `git commit`.
-const TASK_FILES = process.env.OTHALA_TASK_FILES?.split(":").filter(Boolean)
-
 function readFile(path: string): string | undefined {
   try {
     return readFileSync(path, "utf8")
@@ -58,8 +53,10 @@ async function enforce(env: Env, note: (e: Logged) => void, toolName: string, in
   return ok ? undefined : { block: true, reason: "Blocked by guardrails: the user declined." }
 }
 
-// An agent session (extensions/agents) loads guardrails through this with its own settings, since
-// in-process agents share this process's environment.
+// An agent session (extensions/agents) loads guardrails through this with its own settings. A task
+// agent's files are globs relative to its worktree: edit and write outside them are refused, and
+// nothing asks. Its verify command is the one bash command it may run besides `git add` of its
+// files and `git commit`.
 export const guardrails = (task: Pick<Env, "taskFiles" | "taskVerify" | "bash">) => (pi: ExtensionAPI) => {
   const env: Env = { home: homedir(), readFile, realpath, ...task }
   const log: Logged[] = []
@@ -107,4 +104,4 @@ export const guardrails = (task: Pick<Env, "taskFiles" | "taskVerify" | "bash">)
   })
 }
 
-export default guardrails({ taskFiles: TASK_FILES, taskVerify: process.env.OTHALA_TASK_VERIFY })
+export default guardrails({})

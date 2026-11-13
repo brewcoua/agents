@@ -3,7 +3,7 @@
 
 import { glob } from "../guardrails/rules.ts"
 import type { Plan, Task } from "./plan.ts"
-import type { Model, Role } from "../lib/profiles.ts"
+import type { Role } from "../lib/profiles.ts"
 
 export type Status = "pending" | "running" | "review" | "done" | "failed"
 export type Request = { files: string[]; reason: string } // a child asking for more files
@@ -165,29 +165,12 @@ export function childPrompt(run: RunPlan, t: RunTask): string {
     "If the task cannot be done without changing a file outside these, call request_files with the paths and the reason, " +
       "then end your turn; you are started again with the answer, and your changes so far stay in the worktree.",
     "Steps: make the change; run the verify command exactly as written until it passes; then `git add` the files you changed " +
-      "(new files included, by path) and `git commit` with a short imperative message. Nothing may be left uncommitted. " +
+      "(new files included, by path) and `git commit` with a short imperative message, as a command line of their own: " +
+      "`git add <paths> && git commit -m <message>`, nothing else chained, or guardrails refuse it. Nothing may be left uncommitted. " +
       "The message never mentions Claude, Pi or AI and has no Co-Authored-By line. Do not push or switch branches.",
     ...(t.notes ? [`Your previous attempt failed:\n${t.notes}\nFix that.`] : []),
     ...(t.answer ? [`You asked for more files. The answer: ${t.answer}. Your changes so far are still in the worktree; go on from there.`] : []),
   ].join("\n\n")
-}
-
-// A child pi: print mode, no session, -na (project extensions and settings are not loaded;
-// print mode cannot ask for trust), the tier's model, and only the task as its prompt.
-export function childArgs(model: Model, prompt: string): string[] {
-  return ["-p", "--no-session", "--no-mcp", "-na", "--provider", model.provider, "--model", model.id, prompt]
-}
-
-// OTHALA_TASK_REQUEST: where the child's request_files writes its request.
-export function childEnv(t: RunTask, env: NodeJS.ProcessEnv, sccache: boolean, request: string): NodeJS.ProcessEnv {
-  return {
-    ...env,
-    OTHALA_TASK_FILES: t.files.join(":"),
-    OTHALA_TASK_VERIFY: t.verify,
-    OTHALA_TASK_REQUEST: request,
-    // Cargo keeps target/ per worktree; a shared cache would serialise the builds on its lock.
-    ...(sccache ? { RUSTC_WRAPPER: "sccache" } : {}),
-  }
 }
 
 export const tail = (text: string, max: number) => (text.length <= max ? text : `[...]\n${text.slice(-max)}`)

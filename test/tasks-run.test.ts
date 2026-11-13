@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { parsePlan } from "../extensions/tasks/plan.ts"
 import {
-  type RunPlan, type RunTask, answer, childArgs, childEnv, childPrompt, compile, filesOutside, finishCommand, nextBatch,
+  type RunPlan, type RunTask, answer, childPrompt, compile, filesOutside, finishCommand, nextBatch,
   overlap, safeId, start, tierFor, validate,
 } from "../extensions/tasks/run.ts"
 import { type IO, runPlan } from "../extensions/tasks/runner.ts"
@@ -103,15 +103,8 @@ test("files check", () => {
   assert.deepEqual(filesOutside(["src/a.rs", "README.md", "tests/x.rs"], ["src/*.rs", "tests/x.rs"]), ["README.md"])
 })
 
-test("child arguments, environment, prompt", () => {
+test("child prompt", () => {
   const t = task("1", { files: ["a.rs", "b/*.rs"], verify: "cargo test", notes: "it broke" })
-  assert.deepEqual(childArgs({ provider: "p", id: "m" }, "do it"), ["-p", "--no-session", "--no-mcp", "-na", "--provider", "p", "--model", "m", "do it"])
-  const env = childEnv(t, { PATH: "/bin" }, true, "/w/.pi/worktrees/1.request.json")
-  assert.equal(env.OTHALA_TASK_FILES, "a.rs:b/*.rs")
-  assert.equal(env.OTHALA_TASK_REQUEST, "/w/.pi/worktrees/1.request.json")
-  assert.equal(env.OTHALA_TASK_VERIFY, "cargo test")
-  assert.equal(env.RUSTC_WRAPPER, "sccache")
-  assert.equal(childEnv(t, {}, false, "r").RUSTC_WRAPPER, undefined)
   const p = childPrompt(plan(t), t)
   for (const s of ["Goal: g", "- d", "Task 1: t1", "a.rs, b/*.rs", "cargo test", "it broke", "request_files"]) assert.ok(p.includes(s), s)
   assert.ok(childPrompt(plan(t), { ...t, answer: "granted: x" }).includes("The answer: granted: x"))

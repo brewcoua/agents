@@ -2,11 +2,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { basename, join } from "node:path"
 import { Type } from "typebox"
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
-import { USAGE_EVENT } from "../budget/limits.ts"
 import rules from "../guardrails/rules.json"
 import type { Rules } from "../guardrails/rules.ts"
 import { edit } from "../lib/editor.ts"
 import { showList } from "../lib/view.ts"
+import { live } from "../agents/fleet.ts"
 import type { Spawner } from "../agents/runtime.ts"
 import { WORKTREES_DIR, gitIO, killRun } from "./git.ts"
 import {
@@ -30,9 +30,6 @@ function loadTiers() {
   const p = loadProfiles()
   return { roles: loadActive(getAgentDir(), p).roles, maxConcurrent: p.maxConcurrent }
 }
-
-// Set in a task's child pi (run.ts, childEnv).
-const REQUEST = process.env.OTHALA_TASK_REQUEST
 
 // One run per project: worktrees and branches are named by task id alone. The lock holds the pid
 // and a token per extension instance: after /new or /reload the old instance's run may still be
@@ -76,7 +73,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus("plan", state ? "plan mode" : undefined)
     if (state) pi.setActiveTools([...new Set([...pi.getActiveTools(), "scout"])])
     // A Pi killed during a run leaves the processes its children started; nobody else will stop them.
-    if (!REQUEST && existsSync(join(ctx.cwd, WORKTREES_DIR)) && !holder(ctx.cwd, token)) {
+    if (existsSync(join(ctx.cwd, WORKTREES_DIR)) && !holder(ctx.cwd, token)) {
       const n = killRun(ctx.cwd)
       if (n) ctx.ui.notify(`/tasks: stopped ${n} processes left by an interrupted run. /tasks run resumes it.`, "warning")
     }
@@ -198,6 +195,8 @@ export default function (pi: ExtensionAPI) {
       run = c.run
     }
     if (run.status === "done") return ctx.ui.notify(`${name} is already done.`, "info")
+    const spawner = agents()
+    if (!spawner) return ctx.ui.notify("/tasks runs each task as an agent, and the agents extension is not loaded.", "error")
     let tiers
     try {
       tiers = loadTiers()
@@ -207,16 +206,10 @@ export default function (pi: ExtensionAPI) {
     // Interrupted tasks start over: whatever they left running is killed, prepare() resets their worktrees.
     start(run)
     killRun(ctx.cwd)
-    const io = gitIO(
-      ctx.cwd,
-      tiers.roles,
-      save,
-      (m) => {
-        ctx.ui.setStatus("tasks", m)
-        if (!ctx.hasUI) ctx.ui.notify(m, "info")
-      },
-      (u) => pi.events.emit(USAGE_EVENT, { source: "tasks", ...u }),
-    )
+    const io = gitIO(ctx.cwd, spawner, save, (m) => {
+      ctx.ui.setStatus("tasks", m)
+      if (!ctx.hasUI) ctx.ui.notify(m, "info")
+    })
     save(run)
     mkdirSync(join(ctx.cwd, WORKTREES_DIR), { recursive: true })
     try {
@@ -250,6 +243,8 @@ export default function (pi: ExtensionAPI) {
   function stop(ctx: ExtensionCommandContext) {
     if (!controller) return ctx.ui.notify("No tasks are running.", "info")
     controller.abort()
+    const spawner = agents()
+    for (const a of spawner?.agents ?? []) if (a.owner === "tasks" && live(a)) spawner?.stop(a.id)
     const n = killRun(ctx.cwd)
     ctx.ui.notify(`Stopping: ${n} processes killed. Tasks that already passed their checks still land; /tasks run resumes the rest.`, "info")
   }
@@ -333,24 +328,6 @@ export default function (pi: ExtensionAPI) {
       await enter(a, ctx)
     },
   })
-
-  if (REQUEST) {
-    pi.registerTool({
-      name: "request_files",
-      label: "Request files",
-      description:
-        "Ask the task runner for permission to change files outside this task's files, with the reason. " +
-        "Then end your turn: you are started again with the answer, and your changes so far are kept.",
-      parameters: Type.Object({
-        files: Type.Array(Type.String(), { minItems: 1, description: "Paths or globs, relative to the project" }),
-        reason: Type.String({ description: "Why the task cannot be done without them" }),
-      }),
-      async execute(_id, p) {
-        writeFileSync(REQUEST, JSON.stringify(p))
-        return { content: [{ type: "text" as const, text: "Sent. End your turn now; you are started again with the answer." }], details: {} }
-      },
-    })
-  }
 
   pi.registerTool({
     name: "scout",

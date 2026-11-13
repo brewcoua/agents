@@ -1,12 +1,14 @@
-// The runner's IO: git and the child pi processes. Thin on purpose; the logic is in run.ts and runner.ts.
+// The runner's IO: git, the task agents and the verify commands. Thin on purpose; the logic is in run.ts and runner.ts.
 
 import { execFile, spawn } from "node:child_process"
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs"
 import { delimiter, join } from "node:path"
-import { type Usage, readReport } from "../budget/limits.ts"
+import { defineTool } from "@earendil-works/pi-coding-agent"
+import { Type } from "typebox"
+import type { Def } from "../agents/defs.ts"
+import type { Spawner } from "../agents/runtime.ts"
 import type { IO, Output } from "./runner.ts"
-import { type Request, type RunTask, childArgs, childEnv, safeId, tail } from "./run.ts"
-import type { Roles } from "../lib/profiles.ts"
+import { type Request, type RunTask, safeId, tail } from "./run.ts"
 
 export const WORKTREES_DIR = ".pi/worktrees"
 const CHILD_TIMEOUT_MS = 30 * 60_000
@@ -40,8 +42,8 @@ export function kill(match: (tree: string) => boolean): number {
 
 export const killRun = (cwd: string) => kill((tree) => tree.startsWith(`${cwd}#`))
 
-// setpriv --pdeathsig: the kernel kills the child when this Pi dies, even by SIGKILL. What the
-// child started is left to killRun, which the next session start runs.
+// setpriv --pdeathsig: the kernel kills a verify or finish command when this Pi dies, even by
+// SIGKILL. What it started is left to killRun, which the next session start runs.
 const setpriv = onPath("setpriv")
 
 function sh(cwd: string, command: string, args: string[], env: NodeJS.ProcessEnv, tree: string): Promise<Output> {
@@ -59,33 +61,51 @@ function sh(cwd: string, command: string, args: string[], env: NodeJS.ProcessEnv
 }
 
 export const worktreeDir = (cwd: string, t: RunTask) => join(cwd, WORKTREES_DIR, safeId(t.id))
-const requestFile = (cwd: string, t: RunTask) => join(cwd, WORKTREES_DIR, `${safeId(t.id)}.request.json`)
-const usageFile = (cwd: string, t: RunTask) => join(cwd, WORKTREES_DIR, `${safeId(t.id)}.usage.json`)
-
-// What the child's budget extension wrote, taken once.
-export function takeUsage(file: string): Usage | undefined {
-  let text: string | undefined
-  try {
-    text = readFileSync(file, "utf8")
-    rmSync(file, { force: true })
-  } catch {}
-  return readReport(text)
-}
 const branch = (t: RunTask) => `pi-task-${safeId(t.id)}`
 
-export function gitIO(cwd: string, roles: Roles, save: IO["save"], log: IO["log"], usage: (u: Usage) => void): IO {
+// The agent a task runs as; its role is the task's tier, its prompt childPrompt (run.ts).
+const TASK: Def = {
+  name: "task",
+  description: "One task of an approved plan, in its own worktree",
+  role: "large",
+  tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+  maxTurns: 200, // the 30 minutes are the limit
+  isolation: "off",
+  allowedAgents: [],
+  prompt: "You are one task of a plan that /tasks runs; the user's message is the task.",
+  path: "extensions/tasks/git.ts",
+}
+
+export function gitIO(cwd: string, spawner: Spawner, save: IO["save"], log: IO["log"]): IO {
   const bases = new Map<string, string>()
-  const sccache = onPath("sccache")
+  const requests = new Map<string, Request>()
+  // Cargo keeps target/ per worktree; a shared cache would serialise the builds on its lock.
+  const sccache: Record<string, string> = onPath("sccache") ? { RUSTC_WRAPPER: "sccache" } : {}
   const tree = (t: RunTask) => treeOf(cwd, safeId(t.id))
-  const env = (t: RunTask) => childEnv(t, process.env, sccache, requestFile(cwd, t))
   const base = (t: RunTask) => bases.get(t.id) as string
+  const requestFiles = (t: RunTask) =>
+    defineTool({
+      name: "request_files",
+      label: "Request files",
+      description:
+        "Ask the task runner for permission to change files outside this task's files, with the reason. " +
+        "Then end your turn: you are started again with the answer, and your changes so far are kept.",
+      parameters: Type.Object({
+        files: Type.Array(Type.String(), { minItems: 1, description: "Paths or globs, relative to the project" }),
+        reason: Type.String({ description: "Why the task cannot be done without them" }),
+      }),
+      async execute(_id, p) {
+        requests.set(t.id, p)
+        return { content: [{ type: "text" as const, text: "Sent. End your turn now; you are started again with the answer." }], details: {} }
+      },
+    })
   return {
     save,
     log,
     async prepare(t) {
       const dir = worktreeDir(cwd, t)
       bases.set(t.id, (await git(cwd, "rev-parse", "HEAD")).trim())
-      rmSync(requestFile(cwd, t), { force: true })
+      requests.delete(t.id)
       if (existsSync(dir)) {
         try {
           await git(dir, "reset", "--hard", base(t))
@@ -101,22 +121,18 @@ export function gitIO(cwd: string, roles: Roles, save: IO["save"], log: IO["log"
       await git(cwd, "worktree", "add", dir, "-B", branch(t), base(t))
     },
     async child(t, tier, prompt) {
-      const file = usageFile(cwd, t)
-      const out = await sh(worktreeDir(cwd, t), "pi", childArgs(roles[tier], prompt), { ...env(t), OTHALA_BUDGET_REPORT: file }, tree(t))
-      const u = takeUsage(file)
-      if (u) usage(u)
-      return out
+      const a = spawner.spawn({
+        owner: "tasks", def: { ...TASK, role: tier }, prompt, description: `${t.id} ${t.title}`, cwd: worktreeDir(cwd, t),
+        tools: [requestFiles(t)], guard: { taskFiles: t.files, taskVerify: t.verify },
+        env: { ...sccache, OTHALA_TASK_TREE: tree(t) }, timeoutMs: CHILD_TIMEOUT_MS,
+      })
+      await spawner.wait(a)
+      return { code: a.status === "done" ? 0 : 1, output: [a.error && `${a.status}: ${a.error}`, a.result].filter(Boolean).join("\n") }
     },
     async request(t) {
-      const file = requestFile(cwd, t)
-      if (!existsSync(file)) return undefined
-      try {
-        return JSON.parse(readFileSync(file, "utf8")) as Request
-      } catch {
-        return { files: [], reason: "unreadable request" }
-      } finally {
-        rmSync(file, { force: true })
-      }
+      const r = requests.get(t.id)
+      requests.delete(t.id)
+      return r
     },
     async changed(t) {
       const dir = worktreeDir(cwd, t)
@@ -126,7 +142,7 @@ export function gitIO(cwd: string, roles: Roles, save: IO["save"], log: IO["log"
         uncommitted: lines(await git(dir, "status", "--porcelain")).map((l) => l.slice(3)),
       }
     },
-    verify: (t) => sh(worktreeDir(cwd, t), "sh", ["-c", t.verify], env(t), tree(t)),
+    verify: (t) => sh(worktreeDir(cwd, t), "sh", ["-c", t.verify], { ...process.env, ...sccache }, tree(t)),
     // Rebased in the task's worktree, then a fast-forward: HEAD moves once or not at all, so an
     // interruption never leaves a half-applied series in the project.
     async land(t) {

@@ -1,4 +1,3 @@
-import { writeFileSync } from "node:fs"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { showList } from "../lib/view.ts"
 import { type Limits, USAGE_EVENT, type Usage, addOther, check, count, fraction, fresh, num, own, record, status, summary, usd } from "./limits.ts"
@@ -11,9 +10,6 @@ const LIMITS: Limits = {
 // Usage of other sessions this one started is stored as a session entry, so a resumed session
 // counts it again.
 const ENTRY = "budget-usage"
-
-// Set by the tasks extension in a child pi: where to write this session's usage for the parent.
-const REPORT = process.env.OTHALA_BUDGET_REPORT
 
 export default function (pi: ExtensionAPI) {
   let totals = fresh()
@@ -50,7 +46,6 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_end", (event, ctx) => {
     if (event.message.role !== "assistant") return
     count1(event.message)
-    if (REPORT) writeFileSync(REPORT, JSON.stringify(own(totals)))
     update(ctx)
   })
 

@@ -85,7 +85,7 @@ export type Owned = {
   cwd?: string
   tools?: ToolDefinition<any, any>[]
   guard?: Pick<Env, "taskFiles" | "taskVerify">
-  tree?: string // OTHALA_TASK_TREE for its processes
+  env?: Record<string, string> // for its bash; OTHALA_TASK_TREE there says which processes are its
   timeoutMs?: number
 }
 
@@ -329,15 +329,15 @@ export class Spawner {
     return session
   }
 
-  private tree = (a: Agent) => this.owned.get(a.id)?.tree ?? treeOf(this.ctx?.cwd ?? "", `agent-${a.id}`)
+  private tree = (a: Agent) => this.owned.get(a.id)?.env?.OTHALA_TASK_TREE ?? treeOf(this.ctx?.cwd ?? "", `agent-${a.id}`)
 
   // Pi's bash, marking what the agent runs so that stopping it kills those processes too.
   private bash(a: Agent, cwd: string, settings: SettingsManager) {
-    const tree = this.tree(a)
+    const env = { ...this.owned.get(a.id)?.env, OTHALA_TASK_TREE: this.tree(a) }
     return createBashToolDefinition(cwd, {
       commandPrefix: settings.getShellCommandPrefix(),
       shellPath: settings.getShellPath(),
-      spawnHook: (c) => ({ ...c, env: { ...c.env, OTHALA_TASK_TREE: tree } }),
+      spawnHook: (c) => ({ ...c, env: { ...c.env, ...env } }),
     }) as unknown as ToolDefinition<any, any>
   }
 

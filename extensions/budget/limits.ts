@@ -5,19 +5,9 @@ export interface Limits {
 
 export type Usage = { cost: number; tokens: number }
 
-// Emitted on pi.events by the tasks and btw extensions with { source, cost, tokens }: usage of
+// Emitted on pi.events by the agents and btw extensions with { source, cost, tokens }: usage of
 // other sessions this one started.
 export const USAGE_EVENT = "othala:usage"
-
-// What a child pi wrote to its OTHALA_BUDGET_REPORT file; nothing when it wrote nothing.
-export function readReport(text: string | undefined): Usage | undefined {
-  try {
-    const u = JSON.parse(text ?? "")
-    return typeof u?.cost === "number" && typeof u?.tokens === "number" ? { cost: u.cost, tokens: u.tokens } : undefined
-  } catch {
-    return undefined
-  }
-}
 
 export interface Totals {
   cost: number // this session's own messages, plus `others`

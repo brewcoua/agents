@@ -1,5 +1,5 @@
 // The scheduler: steps 4 to 7 of the workflow over an injected IO, so node --test drives it
-// with fakes. git.ts is the IO that runs git and the child pi processes.
+// with fakes. git.ts is the IO that runs git, the task agents and the verify commands.
 
 import {
   MAX_ATTEMPTS, MAX_REQUESTS, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, nextBatch, safeId, summary, tail, tierFor,
@@ -11,8 +11,8 @@ export type IO = {
   save(run: RunPlan): void
   log(message: string): void
   prepare(t: RunTask): Promise<void> // the task's worktree at the current HEAD, empty
-  child(t: RunTask, tier: Role, prompt: string): Promise<Output>
-  request(t: RunTask): Promise<Request | undefined> // what the child asked for with request_files, taken once
+  child(t: RunTask, tier: Role, prompt: string): Promise<Output> // a task agent; code 0 when it ended well
+  request(t: RunTask): Promise<Request | undefined> // what the agent asked for with request_files, taken once
   changed(t: RunTask): Promise<{ files: string[]; uncommitted: string[] }> // against the base commit
   verify(t: RunTask): Promise<Output>
   land(t: RunTask): Promise<string | undefined> // an error text, or nothing; all or nothing on HEAD
@@ -24,7 +24,7 @@ export type IO = {
 async function check(t: RunTask, io: IO, child: Output): Promise<string | undefined> {
   const { files, uncommitted } = await io.changed(t)
   if (uncommitted.length) return `Uncommitted changes were left: ${uncommitted.join(", ")}. Commit them, or remove them.`
-  if (!files.length) return `No commit was made${child.code ? ` (pi exited ${child.code}: ${tail(child.output, 800)})` : ""}.`
+  if (!files.length) return `No commit was made${child.code ? ` (the agent: ${tail(child.output, 800)})` : ""}.`
   const outside = filesOutside(files, t.files)
   if (outside.length) return `The commits touch files outside the task's files: ${outside.join(", ")}. Touch only ${t.files.join(", ")}.`
   const v = await io.verify(t)

@@ -294,7 +294,7 @@ export function checkCommit(command: string, readFile: (path: string) => string 
 
 const PATH_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"])
 
-// What a task's child may run besides its verify command: `git add <paths>` where every path is
+// What a task may run besides its verify command: `git add <paths>` where every path is
 // one of the task's files, and `git commit`. Nothing piped, redirected or substituted.
 export function taskGit(command: string, files: string[], cwd: string): boolean {
   const parsed = parse(command)
@@ -328,13 +328,13 @@ function only(command: string, prefixes: string[]): boolean {
 export type Env = {
   home: string
   readFile: (path: string) => string | undefined
-  taskFiles?: string[] // OTHALA_TASK_FILES: set in a task's child pi
-  taskVerify?: string // OTHALA_TASK_VERIFY
+  taskFiles?: string[] // a task agent's files
+  taskVerify?: string // and its verify command
   bash?: string[] // an agent type's commands: every command run must start with one
   realpath?: (path: string) => string // for edits; absent in tests, where paths are lexical
 }
 
-// The verdict for one tool call. In a task's child nobody can answer, so ask becomes deny.
+// The verdict for one tool call. In a task nobody can answer, so ask becomes deny.
 export function decide(rules: Rules, env: Env, toolName: string, input: Record<string, unknown>, cwd: string): Decision {
   let d: Decision = { verdict: toolVerdict(rules, toolName), reason: `the ${toolName} tool needs confirmation` }
   if (d.verdict === "deny") return { verdict: "deny", reason: `the ${toolName} tool is denied` }
