@@ -81,7 +81,8 @@ export class Spawner {
   private prompts = new Map<string, Start>()
   private transcripts = new Map<string, AgentSession["messages"]>() // of ended agents
   private waiters = new Map<string, (() => void)[]>()
-  private pending = new Map<string, Agent[]>() // children's results an idle parent agent has yet to get
+  private pending = new Map<string, Agent[]>() // children's results a parent agent gets as its next prompt
+  private claimed = new Set<string>() // agents an agent_result call waits on: their result goes there only
   private ctx?: ExtensionContext
   private closed = false
   onRunning = () => {} // the set of running agents changed
@@ -325,12 +326,12 @@ export class Spawner {
     this.sessions.delete(a.id)
     for (const w of this.waiters.get(a.id) ?? []) w()
     this.waiters.delete(a.id)
-    if (a.background) this.deliver(a)
+    if (a.background && !this.claimed.delete(a.id)) this.deliver(a)
     this.pump()
   }
 
   // A background agent's result goes to its parent's next turn: main gets a message that starts
-  // one; an agent parent gets it as a follow-up while it streams, else as its next prompt.
+  // one; an agent parent gets it as its next prompt, unless agent_result read it first.
   private deliver(a: Agent) {
     if (this.closed) return
     // A parent that ended (a nested agent resumed by the user) leaves main to hear of it.
@@ -338,9 +339,7 @@ export class Spawner {
       this.pi.sendMessage({ customType: "agent-result", content: report(a), display: true, details: { id: a.id } }, { triggerTurn: true, deliverAs: "followUp" })
       return
     }
-    const parent = this.sessions.get(a.parent)
-    if (parent?.isStreaming) void parent.followUp(report(a))
-    else this.pending.set(a.parent, [...(this.pending.get(a.parent) ?? []), a])
+    this.pending.set(a.parent, [...(this.pending.get(a.parent) ?? []), a])
   }
 
   wait(a: Agent, signal?: AbortSignal): Promise<void> {
@@ -439,7 +438,12 @@ export class Spawner {
         execute: async (_id, params, signal) => {
           const a = find(this.agents, params.agent)
           if (!a) return text(`No agent ${params.agent}.`)
-          if (params.wait) await this.wait(a, signal)
+          if (params.wait && live(a)) {
+            this.claimed.add(a.id)
+            await this.wait(a, signal)
+            this.claimed.delete(a.id)
+          }
+          if (!live(a)) this.pending.set(a.parent, (this.pending.get(a.parent) ?? []).filter((x) => x !== a))
           return text(report(a))
         },
       }),

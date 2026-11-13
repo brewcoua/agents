@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
-import { MAX_TURNS, loadDefs, parseDef } from "../extensions/agents/defs.ts"
+import { MAX_TURNS, PACKAGE_AGENTS, loadDefs, parseDef } from "../extensions/agents/defs.ts"
 
 const md = (front: string, body = "Do it.") => `---\n${front}\n---\n\n${body}\n`
 
@@ -46,4 +46,11 @@ test("the first directory defining a name wins; broken files are reported; a mis
   assert.deepEqual([...defs.keys()].sort(), ["locate", "scout"])
   assert.equal(defs.get("scout")?.description, "project")
   assert.deepEqual(errors, [`${join(b, "bad.md")}: no description`])
+})
+
+test("the package's agents all load, and start only package agents", () => {
+  const { defs, errors } = loadDefs([PACKAGE_AGENTS])
+  assert.deepEqual(errors, [])
+  assert.deepEqual([...defs.keys()].sort(), ["implement", "locate", "precedent", "research", "review", "scout", "verify-claims"])
+  for (const d of defs.values()) for (const n of d.allowedAgents) assert.ok(defs.has(n), `${d.name} starts unknown ${n}`)
 })
