@@ -9,6 +9,7 @@ modules/tools/pi/
 ├── module.json                       # packages, the npm recipe, the pi emitter
 ├── home/
 │   ├── .local/bin/pi                 # the wrapper: sets the environment, runs the install
+│   ├── .agents/skills -> ../../../agents-common/home/.claude/skills
 │   └── .pi/agent/
 │       ├── models.json               # ollama
 │       ├── tasks.json                # the model tiers of the tasks extension
@@ -63,7 +64,7 @@ The repository holds only:
 |---|---|
 | `enableInstallTelemetry`, `enableAnalytics` | `false` |
 | `packages` | the bridge and the question UI, as `~/.local/share/pi/lib/node_modules/...` paths. Pi resolves `~` in a local path, and a local package is never installed or updated by Pi |
-| `skills` | `~/.claude/skills`: the skills `agents-common` shares |
+| `skills` | `[]`: the shared skills come from `~/.agents/skills` (below) |
 | `theme` | `othala` |
 | `compaction` | `enabled`; the token thresholds stay at Pi's defaults |
 
@@ -81,8 +82,10 @@ merge.
 
 `~/.pi/agent/AGENTS.md` is a link to the file `agents-common` shares with opencode and Claude Code,
 so the rules, the commit rule included, apply to Pi. Pi reads `~/.agents/skills` and
-`~/.pi/agent/skills`, not `~/.claude/skills`; the `skills` setting above is what brings the shared
-skills in, with no copy.
+`~/.pi/agent/skills`, not `~/.claude/skills`. `~/.agents/skills` is a link to the skills
+`agents-common` shares, so Pi gets those and nothing else: `~/.claude/skills/synced/` holds the
+claude.ai account skills Claude Code syncs, which name claude.ai tools Pi does not have, and Pi
+searches a skills directory recursively.
 
 Pi has no subagents, plan mode or web access of its own, and no permission prompts; the
 guardrails extension adds those. MCP servers go in
@@ -98,12 +101,12 @@ command (`ls *` allows `ls`).
 
 | Table | Decides |
 |---|---|
-| `tools` | a tool by name: `edit` and `write` ask, the rest allowed |
+| `tools` | a tool by name: all allowed |
 | `bash` | each simple command, as its words joined by spaces |
 | `bashRegex` | destructive commands: forced recursive delete, force-push, push to `master`/`main`/`release/`, `dd of=`, `DROP TABLE` |
 | `interpreters`, `opaque` | a pipe into a shell or interpreter is denied; `eval`, `exec`, `source`, `.` and `sh -c` ask |
 | `paths` | secrets (`.env`, `*.pem`, `*.key`, SSH keys) are denied, as a tool path and as a word or redirection target of a bash command; `.env.example` is allowed |
-| `external` | a path outside the project asks, except `/tmp` and `/var/tmp` |
+| `external` | a read outside the project asks, except under `/tmp` and `/var/tmp` |
 
 `ask` opens Pi's confirm dialog. With no UI (print and JSON mode) it means deny, and the reason says
 so. The strictest verdict across a command list wins. `rules.ts` tokenizes the shell subset (words,
@@ -121,13 +124,14 @@ or `-F` text holds `Co-Authored-By`, "Generated with", `Claude` (any case) or th
 `AI` is refused. An editor commit, or `-F -`, has no message to read and is allowed. When the
 message sits in a `$(cat <<EOF ...)` the whole command text is scanned instead.
 
-`edit` and `write` under `<project>/.pi/plans/` are allowed without asking, in every session: the
-`tasks` extension has the model write its plan and task files there, including in print mode, where
-nothing could answer.
+`edit` and `write` inside the project directory (Pi's working directory) are allowed without
+asking, the plan files under `.pi/plans/` included. Outside it they always ask, `/tmp` included,
+whatever `external` says.
 
 The `tasks` extension starts each task's child `pi` with two variables, and guardrails then runs in
 task mode. `OTHALA_TASK_FILES`, a `:`-separated list of globs relative to the project, allows `edit`
-and `write` to those paths and refuses every other path. `OTHALA_TASK_VERIFY` is the task's verify
+and `write` to those paths and refuses every other path; the refusal tells the model to call
+`request_files` (see Running tasks). `OTHALA_TASK_VERIFY` is the task's verify
 command: a bash command equal to it is allowed, as is `git add <paths>` where every path is one of
 the task's files, and `git commit`, to which the commit rule still applies. Everything else follows
 the normal rules, and `ask` means deny, since a child has nobody to answer. Bash is otherwise not
@@ -252,8 +256,10 @@ reason and stays a draft; an approved multi-task plan starts running at once.
 ### Running tasks
 
 `/tasks run [slug]` runs an approved plan, or resumes one; without a slug it takes the only open plan.
-`/tasks status [slug]` prints each task's status. Both want the TUI or RPC: Pi does not run extension commands
-in print mode. The plan file gains an optional `## Finish` section, one line holding the command that runs the
+`/tasks status [slug]` prints each task's status, and `/tasks stop` stops a run. They want the TUI or RPC: Pi
+does not run extension commands in print mode. A run goes on in the background, with its progress in the status
+line, so the session stays usable meanwhile. One run at a time per project: `.pi/worktrees/run.lock` holds the
+pid of the Pi running it. The plan file gains an optional `## Finish` section, one line holding the command that runs the
 project's full tests. The run goes through these steps:
 
 1. Compile. The plan becomes `.pi/plans/<slug>.json`: the plan's title, goal, decisions and finish command,
@@ -268,20 +274,40 @@ project's full tests. The run goes through these steps:
    command and accept line. The child edits, runs verify, and commits in its worktree, with `OTHALA_TASK_FILES`
    and `OTHALA_TASK_VERIFY` set (see Guardrails). With `sccache` on PATH, `RUSTC_WRAPPER=sccache` is set too, so
    Cargo's per-worktree `target/` shares compiles; other languages need nothing. A child has 30 minutes.
+
+   A child that needs a file outside its `files` calls `request_files` with the paths and a reason, and ends.
+   The parent grants it when no task that may run at the same time (not done, not ordered with it by `deps`)
+   has an overlapping file, adds the paths to the task's `files` and its `granted` list, and starts a child
+   again in the same worktree, without a reset, with the answer in its prompt. Otherwise the answer is a refusal
+   naming the other task. Nobody is asked. Three requests per task are answered; a fourth ends the attempt.
 3. Check. No model reads the diff: the parent checks that nothing is uncommitted, that there is a commit,
    that every file in `git diff --name-only <base> HEAD` matches the task's `files`, and re-runs the verify
    command in the worktree. A failure goes back to a fresh worktree and a new child with the failure as notes.
    Two failures on the task's tier give a third attempt on `large`; after that the task is `failed`, the run
    stops, and its worktree stays for you to look at.
-4. Land. The batch's passing tasks are cherry-picked onto the current branch one at a time, then the worktree
-   and its branch are removed. A cherry-pick that does not apply is aborted and fails the task. Later batches
-   branch from the new HEAD, so they see their dependencies.
+4. Land. The batch's passing tasks land one at a time: the task's branch is rebased onto the current HEAD in
+   its worktree, then the current branch is fast-forwarded to it, so HEAD moves once or not at all. Then the
+   worktree and its branch are removed. A rebase that does not apply is aborted and fails the task. Later
+   batches branch from the new HEAD, so they see their dependencies.
 5. Finish. When every task is done, the `## Finish` command runs in the project; if it fails the run stays open and
    `/tasks run` repeats it. Then the plan file is marked `status: done` and a summary of the tasks is shown.
 
 `/tasks run` on a plan that stopped puts `running`, `review` and `failed` tasks back to `pending` with their
-attempts reset. Their worktrees are listed and you are asked before they are discarded; with no UI nothing
-is deleted and the list is the message.
+attempts reset, and starts them over: their worktrees are reset to the new base without asking, and recreated
+when a killed `git` left them locked. A failed task's worktree is there to look at only until then.
+
+Every process a run starts carries `OTHALA_TASK_TREE=<project>#<task>` in its environment, inherited by what
+it starts in turn. Stopping kills each process whose `/proc/<pid>/environ` holds that marker, so what a child
+started in its own process group or session goes too, and a shell you opened in a worktree does not. The
+moments it runs:
+
+| When | What stops |
+|---|---|
+| `/tasks stop` | the children and everything they started; tasks that already passed their checks still land, nothing new starts |
+| Pi quits, or the session is replaced | the same, at `session_shutdown` |
+| Pi is killed | each child, at once, by the kernel: children run under `setpriv --pdeathsig KILL` (util-linux). What they started is stopped at the next Pi start in the project, unless another Pi holds the lock |
+| `/tasks run` | whatever an earlier run left, before it starts |
+| A child passes 30 minutes | that task's processes |
 
 ## Theme
 
