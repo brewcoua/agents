@@ -3,6 +3,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { type Show, bearer, buildEntry, parseModelIds, parseShow, showUrl } from "./discovery.ts"
+import prices from "./prices.json"
 
 const TIMEOUT_MS = 3000
 
@@ -51,10 +52,10 @@ export default async function (pi: ExtensionAPI) {
             } catch {
               // not ollama, or the model vanished: defaults
             }
-            return buildEntry(id, show)
+            return buildEntry(id, show, prices)
           }),
         )
-        const models = [...own.map((m) => ({ ...buildEntry(m.id), ...m })), ...found]
+        const models = [...own.map((m) => ({ ...buildEntry(m.id, undefined, prices), ...m })), ...found]
         if (found.length === 0) return
         pi.registerProvider(name, { baseUrl: p.baseUrl, apiKey: p.apiKey, api: p.api ?? "openai-completions", models })
       } catch (err) {

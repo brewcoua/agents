@@ -1,3 +1,7 @@
+export type Cost = { input: number; output: number; cacheRead: number; cacheWrite: number }
+// Per million tokens, by the model's name without its cloud suffix (prices.json).
+export type Prices = Record<string, { input?: number; cacheRead?: number; output?: number }>
+
 export type Show = { contextWindow?: number; vision: boolean; thinking: boolean }
 
 export type ModelEntry = {
@@ -5,13 +9,14 @@ export type ModelEntry = {
   name: string
   reasoning: boolean
   input: ("text" | "image")[]
-  cost: { input: 0; output: 0; cacheRead: 0; cacheWrite: 0 }
+  cost: Cost
   contextWindow: number
   maxTokens: number
 }
 
 const DEFAULT_CONTEXT = 128000
-const MAX_OUTPUT = 16384
+// ollama reports no output limit; Pi's default of 16K is too low for coding.
+const MAX_OUTPUT = 65536
 
 // OpenAI-compatible /models: { data: [{ id }] }.
 export function parseModelIds(json: unknown): string[] {
@@ -34,14 +39,21 @@ export function parseShow(json: unknown): Show {
   }
 }
 
-export function buildEntry(id: string, show?: Show): ModelEntry {
+// A cloud tag is "<name>:cloud" or "<name>-cloud" (gpt-oss:120b-cloud); a local model costs nothing.
+export function priceFor(id: string, prices: Prices): Cost {
+  const m = /^(.+)[:-]cloud$/.exec(id)
+  const p = (m && prices[m[1]]) || {}
+  return { input: p.input ?? 0, output: p.output ?? 0, cacheRead: p.cacheRead ?? 0, cacheWrite: 0 }
+}
+
+export function buildEntry(id: string, show?: Show, prices: Prices = {}): ModelEntry {
   const contextWindow = show?.contextWindow ?? DEFAULT_CONTEXT
   return {
     id,
     name: id,
     reasoning: show?.thinking ?? false,
     input: show?.vision ? ["text", "image"] : ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    cost: priceFor(id, prices),
     contextWindow,
     maxTokens: Math.min(MAX_OUTPUT, contextWindow),
   }

@@ -84,6 +84,8 @@ Markdown memory that survives sessions, kept the way Claude Code keeps its own: 
 
 Lists the models of an OpenAI-compatible server at start-up and registers them with Pi. A provider in `~/.pi/agent/models.json` opts in with `"modelsDiscovery": true`, a key Pi itself ignores; the `pi` module's ollama provider does. It calls `GET <baseUrl>/models`, then ollama's `POST /api/show` on the same host for each model, for the context length and the vision and thinking capabilities. Models listed in models.json win over discovered ones. It talks only to the configured host, with a 3 second timeout. With the host down, nothing is added and nothing is printed; `OTHALA_DEBUG=1` says why.
 
+A discovered model gets an output cap of 64K tokens, since ollama reports none and Pi's default of 16K is too low for coding. A cloud model (`<name>:cloud`, or `<name>-cloud` as in `gpt-oss:120b-cloud`) gets its per-million price from `extensions/models-discovery/prices.json`, by name, so the budget's dollar cap counts ollama cloud; a local model costs 0. Off-peak prices are left out: the extension does not know the clock they follow.
+
 ### budget
 
 Caps spend per session. It adds up cost and tokens (`input + output`) from each assistant message's usage, which is the cost Pi shows in its footer. It warns once at 25, 50 and 75% of the nearer cap. At 100% it blocks every further tool call with a reason telling the model to report and stop. Set `PI_BUDGET_USD` (default 2) and `PI_BUDGET_TOKENS` (default 5000000); 0 disables a cap. A model with no catalog price, such as the Claude bridge on a subscription, records a cost of 0, so only the token cap applies to it. There is no cap on output tokens per request; use `maxTokens` in models.json. A resumed or forked session starts from what its history already spent.
@@ -106,6 +108,35 @@ The tools make requests only when the model calls them. chromium runs with a fre
 deleted after, and with its own background requests (component updates, sync, metrics) turned off.
 Guardrails allows all three, as it allows `curl`.
 
+## Profiles
+
+`profiles.json` maps each provider profile to three models, one per role, as `provider/model`:
+
+| Role | Used by |
+|---|---|
+| `top` | the session after a switch, `/plan` |
+| `large` | `large` tasks, and the third attempt of a failing task |
+| `small` | scouts, `small` tasks |
+
+| Profile | `top` | `large` | `small` |
+|---|---|---|---|
+| `claude` | `claude-bridge/claude-opus-5-5` | `claude-bridge/claude-sonnet-5-5` | `claude-bridge/claude-haiku-5-5` |
+| `codex` | `openai-codex/gpt-6.1-sol` | `openai-codex/gpt-6.1-terra` | `openai-codex/gpt-6-luna` |
+| `copilot` | `github-copilot/gpt-6-luna` | `github-copilot/gpt-5.6-luna` | `github-copilot/mai-code-1.1-flash` |
+| `ollama` | `ollama/kimi-k3.1-pro:cloud` | `ollama/glm-5.3:cloud` | `ollama/glm-5.3-flash:cloud` |
+
+`/provider <name>` switches the session to the profile's `top` model and stores the profile and the
+model of each role in `~/.pi/agent/othala-profile.json`, which tasks and scouts read. A role whose
+model Pi does not know keeps the model it had, and the command says so; for ollama it gives the
+`ollama pull` line. A profile whose `top` model has no credentials is refused. `/provider` alone
+shows the active profile, each role's model, and whether Pi has credentials for it. With no state
+file, the first profile of `order` is active.
+
+When a run ends on an error that reads as an exhausted quota or a rate limit, the extension offers
+the next profile of `order` (`claude`, `codex`, `copilot`, `ollama`) and switches only on a yes. The
+match (`429`, "rate limit", "usage limit", "quota", "too many requests") is not checked against each
+provider's real errors yet.
+
 ## Tasks
 
 The `tasks` extension plans before it builds, then runs the plan's tasks in git worktrees, each in a
@@ -113,20 +144,12 @@ child `pi`. Planning and review come first; a small change is implemented in the
 
 ### Tiers
 
-`~/.pi/agent/tasks.json` names three models as `provider/model` and a concurrency for the task runner.
-The `pi` module ships it; Pi never rewrites the file:
-
-```json
-{ "plan": "claude-bridge/claude-opus-5-5", "large": "claude-bridge/claude-sonnet-5-5",
-  "small": "claude-bridge/claude-haiku-5-5", "maxConcurrent": 3 }
-```
-
-The defaults are the newest Opus, Sonnet and Haiku of the Claude bridge. Any provider works, an
-ollama model for `small` included.
+A task's `tier` (`small` or `large`) is a role of the active profile ([Profiles](#profiles)), and
+`/plan` uses `top`. At most `maxConcurrent` of `profiles.json` tasks run at once.
 
 ### Planning
 
-`/plan <request>` switches to the `plan` model and tells it that it is planning. The session is then
+`/plan <request>` switches to the `top` model and tells it that it is planning. The session is then
 read-only: `edit` and `write` are refused outside `.pi/plans/`, and `bash` runs only what guardrails
 allow without asking. An `ask` verdict counts as a refusal here, since the model has nobody to ask.
 Other tools (memory, MCP, codemode) are refused too. The model asks you with `ask_user_question`,
@@ -152,6 +175,35 @@ status: draft
 ## Goal
 ## Decisions
 ## Open questions
+
+## Profiles
+
+`profiles.json` maps each provider profile to three models, one per role, as `provider/model`:
+
+| Role | Used by |
+|---|---|
+| `top` | the session after a switch, `/plan` |
+| `large` | `large` tasks, and the third attempt of a failing task |
+| `small` | scouts, `small` tasks |
+
+| Profile | `top` | `large` | `small` |
+|---|---|---|---|
+| `claude` | `claude-bridge/claude-opus-5-5` | `claude-bridge/claude-sonnet-5-5` | `claude-bridge/claude-haiku-5-5` |
+| `codex` | `openai-codex/gpt-6.1-sol` | `openai-codex/gpt-6.1-terra` | `openai-codex/gpt-6-luna` |
+| `copilot` | `github-copilot/gpt-6-luna` | `github-copilot/gpt-5.6-luna` | `github-copilot/mai-code-1.1-flash` |
+| `ollama` | `ollama/kimi-k3.1-pro:cloud` | `ollama/glm-5.3:cloud` | `ollama/glm-5.3-flash:cloud` |
+
+`/provider <name>` switches the session to the profile's `top` model and stores the profile and the
+model of each role in `~/.pi/agent/othala-profile.json`, which tasks and scouts read. A role whose
+model Pi does not know keeps the model it had, and the command says so; for ollama it gives the
+`ollama pull` line. A profile whose `top` model has no credentials is refused. `/provider` alone
+shows the active profile, each role's model, and whether Pi has credentials for it. With no state
+file, the first profile of `order` is active.
+
+When a run ends on an error that reads as an exhausted quota or a rate limit, the extension offers
+the next profile of `order` (`claude`, `codex`, `copilot`, `ollama`) and switches only on a yes. The
+match (`429`, "rate limit", "usage limit", "quota", "too many requests") is not checked against each
+provider's real errors yet.
 
 ## Tasks
 ### 3.1 dnf backend

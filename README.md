@@ -5,6 +5,7 @@ TypeScript as it is; there is no build step.
 
 ```text
 AGENTS.md      # the working rules
+profiles.json  # the provider profiles: a model per role
 skills/        # grill, handoff, docs-writing, terse-output, simplify, documents
 extensions/    # the Pi extensions; extensions/lib/ is shared code
 test/          # unit tests (*.test.ts) and the load test (load.ts)

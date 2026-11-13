@@ -1,0 +1,26 @@
+{
+  "order": ["claude", "codex", "copilot", "ollama"],
+  "maxConcurrent": 3,
+  "profiles": {
+    "claude": {
+      "top": "claude-bridge/claude-opus-5-5",
+      "large": "claude-bridge/claude-sonnet-5-5",
+      "small": "claude-bridge/claude-haiku-5-5"
+    },
+    "codex": {
+      "top": "openai-codex/gpt-6.1-sol",
+      "large": "openai-codex/gpt-6.1-terra",
+      "small": "openai-codex/gpt-6-luna"
+    },
+    "copilot": {
+      "top": "github-copilot/gpt-6-luna",
+      "large": "github-copilot/gpt-5.6-luna",
+      "small": "github-copilot/mai-code-1.1-flash"
+    },
+    "ollama": {
+      "top": "ollama/kimi-k3.1-pro:cloud",
+      "large": "ollama/glm-5.3:cloud",
+      "small": "ollama/glm-5.3-flash:cloud"
+    }
+  }
+}

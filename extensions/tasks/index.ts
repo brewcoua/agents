@@ -16,7 +16,7 @@ import {
 import { type RunPlan, type RunTask, compile, start, summary } from "./run.ts"
 import { runPlan } from "./runner.ts"
 import { MAX_SCOUTS, SCOUT_TIMEOUT_MS, formatScouts, scoutArgs } from "./scout.ts"
-import { type Model, parseTiers } from "./tiers.ts"
+import { type Model, loadActive, loadProfiles } from "../lib/profiles.ts"
 
 const R = rules as Rules
 
@@ -25,7 +25,11 @@ const R = rules as Rules
 type State = { path: string; before?: Model }
 const ENTRY = "tasks-plan"
 
-const loadTiers = () => parseTiers(readFileSync(join(getAgentDir(), "tasks.json"), "utf8"))
+// The active profile's roles (/provider), and how many tasks run at once.
+function loadTiers() {
+  const p = loadProfiles()
+  return { roles: loadActive(getAgentDir(), p).roles, maxConcurrent: p.maxConcurrent }
+}
 
 // Set in a task's child pi (run.ts, childEnv).
 const REQUEST = process.env.OTHALA_TASK_REQUEST
@@ -100,10 +104,11 @@ export default function (pi: ExtensionAPI) {
     } catch (e) {
       return ctx.ui.notify(`/plan: ${e instanceof Error ? e.message : e}`, "error")
     }
-    const model = ctx.modelRegistry.find(tiers.plan.provider, tiers.plan.id)
-    if (!model) return ctx.ui.notify(`/plan: model ${tiers.plan.provider}/${tiers.plan.id} is not available (tasks.json)`, "error")
+    const top = tiers.roles.top
+    const model = ctx.modelRegistry.find(top.provider, top.id)
+    if (!model) return ctx.ui.notify(`/plan: model ${top.provider}/${top.id} is not available (/provider)`, "error")
     const before = ctx.model && { provider: ctx.model.provider, id: ctx.model.id }
-    if (!(await pi.setModel(model))) return ctx.ui.notify(`/plan: no credentials for ${tiers.plan.provider}`, "error")
+    if (!(await pi.setModel(model))) return ctx.ui.notify(`/plan: no credentials for ${top.provider}`, "error")
 
     const dir = join(ctx.cwd, PLANS_DIR)
     mkdirSync(dir, { recursive: true })
@@ -224,7 +229,7 @@ export default function (pi: ExtensionAPI) {
     killRun(ctx.cwd)
     const io = gitIO(
       ctx.cwd,
-      tiers,
+      tiers.roles,
       save,
       (m) => {
         ctx.ui.setStatus("tasks", m)
@@ -379,7 +384,7 @@ export default function (pi: ExtensionAPI) {
       questions: Type.Array(Type.String(), { minItems: 1, maxItems: MAX_SCOUTS, description: "One self-contained question per scout" }),
     }),
     async execute(_id, p, signal, _update, ctx) {
-      const { small } = loadTiers()
+      const { small } = loadTiers().roles
       // pi.exec takes no environment, so env(1) passes the budget report file.
       const results = await Promise.all(
         p.questions.map(async (q, i) => {

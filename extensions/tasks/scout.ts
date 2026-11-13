@@ -1,5 +1,5 @@
 // Pure part of the scout tool: no Pi imports, so node --test runs it.
-import type { Model } from "./tiers.ts"
+import type { Model } from "../lib/profiles.ts"
 
 export const MAX_SCOUTS = 6
 export const SCOUT_TIMEOUT_MS = 180_000

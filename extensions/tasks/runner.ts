@@ -4,14 +4,14 @@
 import {
   MAX_ATTEMPTS, MAX_REQUESTS, type Request, type RunPlan, type RunTask, answer, childPrompt, filesOutside, nextBatch, safeId, summary, tail, tierFor,
 } from "./run.ts"
-import type { Tier } from "./tiers.ts"
+import type { Role } from "../lib/profiles.ts"
 
 export type Output = { code: number | null; output: string }
 export type IO = {
   save(run: RunPlan): void
   log(message: string): void
   prepare(t: RunTask): Promise<void> // the task's worktree at the current HEAD, empty
-  child(t: RunTask, tier: Tier, prompt: string): Promise<Output>
+  child(t: RunTask, tier: Role, prompt: string): Promise<Output>
   request(t: RunTask): Promise<Request | undefined> // what the child asked for with request_files, taken once
   changed(t: RunTask): Promise<{ files: string[]; uncommitted: string[] }> // against the base commit
   verify(t: RunTask): Promise<Output>

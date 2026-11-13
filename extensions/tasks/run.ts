@@ -3,7 +3,7 @@
 
 import { glob } from "../guardrails/rules.ts"
 import type { Plan, Task } from "./plan.ts"
-import type { Model, Tier, Tiers } from "./tiers.ts"
+import type { Model, Role } from "../lib/profiles.ts"
 
 export type Status = "pending" | "running" | "review" | "done" | "failed"
 export type Request = { files: string[]; reason: string } // a child asking for more files
@@ -133,7 +133,7 @@ export function nextBatch(run: RunPlan, max: number): RunTask[] {
 }
 
 // Two failed attempts on the task's own tier, then the large one.
-export const tierFor = (t: RunTask): Tier => ((t.attempts ?? 0) >= 2 ? "large" : t.tier)
+export const tierFor = (t: RunTask): Role => ((t.attempts ?? 0) >= 2 ? "large" : t.tier)
 
 // A request is granted when no task that may run at the same time touches the files, so the
 // tasks of a batch stay disjoint; the parent decides, and nobody is asked.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { bearer, buildEntry, parseModelIds, parseShow, showUrl } from "../extensions/models-discovery/discovery.ts"
+import { bearer, buildEntry, parseModelIds, parseShow, priceFor, showUrl } from "../extensions/models-discovery/discovery.ts"
 
 test("parseModelIds: ids only, junk ignored", () => {
   assert.deepEqual(parseModelIds({ data: [{ id: "a:1b" }, { id: "" }, {}, null, { id: 3 }, { id: "b" }] }), ["a:1b", "b"])
@@ -21,7 +21,7 @@ test("parseShow: context length from model_info, capabilities", () => {
 test("buildEntry: defaults and show data", () => {
   const d = buildEntry("m")
   assert.equal(d.contextWindow, 128000)
-  assert.equal(d.maxTokens, 16384)
+  assert.equal(d.maxTokens, 65536)
   assert.deepEqual(d.input, ["text"])
   assert.equal(d.reasoning, false)
   const e = buildEntry("v", { contextWindow: 8192, vision: true, thinking: true })
@@ -40,4 +40,13 @@ test("bearer: literal and env, never a command", () => {
 
 test("showUrl: native endpoint on the same host", () => {
   assert.equal(showUrl("http://localhost:11434/v1"), "http://localhost:11434/api/show")
+})
+
+test("priceFor: cloud tags by their base name, local models free", () => {
+  const prices = { "glm-5.3": { input: 1.4, cacheRead: 0.26, output: 4.4 }, "gpt-oss:120b": { input: 0.15, cacheRead: 0.014, output: 0.6 } }
+  assert.deepEqual(priceFor("glm-5.3:cloud", prices), { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 })
+  assert.equal(priceFor("gpt-oss:120b-cloud", prices).output, 0.6)
+  assert.equal(priceFor("gpt-oss:120b", prices).input, 0)
+  assert.equal(priceFor("unpriced:cloud", prices).input, 0)
+  assert.equal(buildEntry("glm-5.3:cloud", undefined, prices).cost.input, 1.4)
 })

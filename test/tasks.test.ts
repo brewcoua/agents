@@ -6,7 +6,6 @@ import {
   PLAN_FORMAT, commentsMessage, isSmall, parseComments, parsePlan, planStatus, planVerdict, slug, uniqueSlug, withStatus,
 } from "../extensions/tasks/plan.ts"
 import { clip, formatScouts, scoutArgs } from "../extensions/tasks/scout.ts"
-import { parseTiers, splitModel } from "../extensions/tasks/tiers.ts"
 
 const here = (p: string) => new URL(`../${p}`, import.meta.url)
 const rules: Rules = JSON.parse(readFileSync(here("extensions/guardrails/rules.json"), "utf8"))
@@ -18,15 +17,6 @@ test("slug: lowercase words, bounded, never empty", () => {
   assert.ok(slug("x".repeat(100)).length <= 48)
   assert.equal(uniqueSlug("a", (s) => s === "a" || s === "a-2"), "a-3")
   assert.equal(uniqueSlug("a", () => false), "a")
-})
-
-test("tiers: invalid files say what is wrong", () => {
-  assert.deepEqual(splitModel("ollama/qwen2.5-coder:7b"), { provider: "ollama", id: "qwen2.5-coder:7b" })
-  assert.throws(() => splitModel("nomodel"), /provider\/model/)
-  const ok = { plan: "a/b", large: "a/b", small: "a/b", maxConcurrent: 2 }
-  assert.throws(() => parseTiers(JSON.stringify({ ...ok, small: undefined })), /"small"/)
-  assert.throws(() => parseTiers(JSON.stringify({ ...ok, maxConcurrent: 0 })), /maxConcurrent/)
-  assert.equal(parseTiers(JSON.stringify(ok)).maxConcurrent, 2)
 })
 
 const PLAN = `---

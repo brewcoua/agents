@@ -6,7 +6,7 @@ import { delimiter, join } from "node:path"
 import { type Usage, readReport } from "../budget/limits.ts"
 import type { IO, Output } from "./runner.ts"
 import { type Request, type RunTask, childArgs, childEnv, safeId, tail } from "./run.ts"
-import type { Tiers } from "./tiers.ts"
+import type { Roles } from "../lib/profiles.ts"
 
 export const WORKTREES_DIR = ".pi/worktrees"
 const CHILD_TIMEOUT_MS = 30 * 60_000
@@ -73,7 +73,7 @@ export function takeUsage(file: string): Usage | undefined {
 }
 const branch = (t: RunTask) => `pi-task-${safeId(t.id)}`
 
-export function gitIO(cwd: string, tiers: Tiers, save: IO["save"], log: IO["log"], usage: (u: Usage) => void): IO {
+export function gitIO(cwd: string, roles: Roles, save: IO["save"], log: IO["log"], usage: (u: Usage) => void): IO {
   const bases = new Map<string, string>()
   const sccache = onPath("sccache")
   const tree = (t: RunTask) => treeOf(cwd, safeId(t.id))
@@ -102,7 +102,7 @@ export function gitIO(cwd: string, tiers: Tiers, save: IO["save"], log: IO["log"
     },
     async child(t, tier, prompt) {
       const file = usageFile(cwd, t)
-      const out = await sh(worktreeDir(cwd, t), "pi", childArgs(tiers[tier], prompt), { ...env(t), OTHALA_BUDGET_REPORT: file }, tree(t))
+      const out = await sh(worktreeDir(cwd, t), "pi", childArgs(roles[tier], prompt), { ...env(t), OTHALA_BUDGET_REPORT: file }, tree(t))
       const u = takeUsage(file)
       if (u) usage(u)
       return out
