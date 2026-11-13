@@ -9,6 +9,7 @@ profiles.json  # the provider profiles: a model per role
 skills/        # grill, handoff, docs-writing, terse-output, simplify, documents
 extensions/    # the Pi extensions; extensions/lib/ is shared code
 test/          # unit tests (*.test.ts) and the load test (load.ts)
+agents/        # Pi's agent types: locate, scout, research, review, implement, precedent, verify-claims
 claude/agents/ # Claude Code's subagents: locate, scout, review, research, implement, refactor
 docs/          # extensions.md, skills.md
 ```

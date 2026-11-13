@@ -335,3 +335,91 @@ moments it runs:
 
 `.pi/plans/` and `.pi/worktrees/` are in the `git` module's global ignore in config, so no project's
 `.gitignore` changes.
+
+## Agents
+
+The `agents` extension gives the model subagents: each is a separate Pi session in this process, with
+its own context, tools and model, that works on one prompt and returns its final answer.
+
+### Agent types
+
+A type is a Markdown file: frontmatter, then the prompt, appended to the agent's system prompt.
+
+```markdown
+---
+name: locate
+description: Finds where a symbol is defined. The model reads this to pick a type.
+role: small
+tools: [read, grep, find, ls]
+max_turns: 20
+---
+
+You locate code. ...
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `name`, `description` | required | |
+| `role` | `large` | `top`, `large` or `small`: the model is that role of the active profile ([Profiles](#profiles)) |
+| `tools` | every tool | an allowlist; `web_search`, `web_fetch` and `web_render` load the `web` extension |
+| `max_turns` | 50 | after it, the agent is told to wrap up; 3 turns later it is stopped |
+| `isolation` | `off` | `worktree`: it works in `.pi/worktrees/agent-<id>` on branch `agent-<id>`, committed when it ends |
+| `allowed_agents` | none | the types it may start itself; agents nest 2 deep |
+
+Types are read from `.pi/agents/` in the project, then `~/.pi/agent/agents/`, then the package's
+`agents/`; the first file with a name wins. `/agents` lists them with their role, tools and file, and
+`e` opens one in your editor. A file that does not parse is listed as skipped, with the reason.
+
+The package's types:
+
+| Type | Role | Does |
+|---|---|---|
+| `locate` | small | finds definitions, callers and uses; a `path:line` table |
+| `scout` | small | answers one external question from docs and the web, with sources |
+| `research` | large | splits a broad question, starts `scout`, `locate` and `precedent` agents, writes the synthesis |
+| `review` | large | reviews a diff: one line per finding, `blocker`, `major` or `minor`, quoting the line |
+| `implement` | large | does one specified subtask and runs the narrowest check |
+| `precedent` | small | finds similar past commits in git history and the fixes that followed them |
+| `verify-claims` | small | tags each claim about the code Verified, Weakened or Falsified, citing `file:line` |
+
+`precedent` and `verify-claims` are adapted from rpiv's `precedent-locator` and `claim-verifier`
+([rpiv-mono](https://github.com/juicesharp/rpiv-mono), MIT, Copyright (c) 2026 juicesharp).
+
+The `bash` limits in the `review`, `precedent` and `verify-claims` prompts (git reads only) are
+instructions; guardrails apply to agent sessions as to yours, but nothing narrower is enforced yet.
+
+### Starting agents
+
+The model calls `agent` with a `type`, a self-contained `prompt` and a short `description`.
+
+- **Background** is the default: the tool returns the agent's id and handle at once, and the result
+  arrives as a message that starts your next turn. With `background: false` the call waits for it.
+  In print mode every agent runs in the foreground, since Pi exits after its turn.
+- `agent_result` reads an agent's state, or with `wait`, blocks until it ends. `agent_steer` sends a
+  running agent a message it reads after its current tool call.
+- `resume` with an ended agent's id or handle continues it in its own context with a new prompt.
+  Agents are saved next to the session, so they can be resumed after Pi restarts (`pi -c`). A
+  worktree agent cannot be resumed while its worktree has uncommitted changes.
+- `inherit_context: true` starts the agent from a copy of this conversation instead of an empty one.
+- `model` (`provider/model`), `thinking`, `max_turns`, `isolation` and `name` override the type.
+
+At most `maxConcurrent` of `profiles.json` agents run at once per nesting level; the rest queue. An
+agent with children waits for its background children before it ends, and gets their results as
+its next prompt. Stopping an agent stops its children. Agents stop when the session ends.
+
+### The fleet
+
+While an agent runs, a line above the editor shows its handle, current tool, tokens and context use.
+Below the editor, the fleet lists every agent of the session as a tree.
+
+| Key | Where | Does |
+|---|---|---|
+| `↓` | empty prompt | selects the fleet; `↑` and `↓` move, `Esc` leaves |
+| `Enter` | fleet | opens the agent's transcript, which follows it as it works |
+| `Enter` | transcript | asks for a message and steers the agent with it |
+| `x` `x` | fleet, transcript | stops the agent and its children |
+| `b` | fleet, transcript | moves a foreground agent to the background |
+| `ctrl+b` | prompt | moves every foreground agent to the background; cursor-left otherwise |
+
+A prompt `@<handle> <message>` steers that agent when it runs and resumes it when it has ended. A
+word after `@` that is no agent's handle, such as a file reference, leaves the prompt alone.

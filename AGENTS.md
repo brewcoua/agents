@@ -116,7 +116,7 @@ After two failed attempts on the same region, change strategy fundamentally or a
 
 ## 10. Delegate the reading
 
-Hand search-heavy and read-heavy work to subagents so their raw reading stays out of this context: `locate` to find code, `scout` for one external question, `review` to audit a diff, `research` for a broad question needing several perspectives.
+Hand search-heavy and read-heavy work to subagents so their raw reading stays out of this context: `locate` to find code, `scout` for one external question, `review` to audit a diff, `research` for a broad question needing several perspectives. In Pi, also `precedent` for what past changes to the same code went through, and `verify-claims` to check claims about the code before acting on them.
 
 ## 11. Commit messages
 
