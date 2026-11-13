@@ -54,7 +54,8 @@ installs packages and links nothing; without it the skill says which module is m
 
 `SKILL.md` is a short router; the commands for each format sit in `references/<format>.md`, which
 an agent reads only for the format at hand. python-pptx and pdfplumber are not in Arch's official
-repositories, so the skill does without them.
+repositories, and Fedora does not package python-docx either, so the skill does without them and
+falls back to the raw XML.
 
 **Rules.** The rules file is `~/.config/agents/AGENTS.md`. `~/.config/opencode/AGENTS.md` and
 `~/.claude/CLAUDE.md` are symlinks committed to git, pointing at it. `othala link` links a symlink

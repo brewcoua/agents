@@ -24,7 +24,8 @@ Headings, lists, tables, images, footnotes and links come through. For anything 
 
 ## Edit an existing document
 
-Converting to Markdown and back loses the formatting. Edit it in place with python-docx:
+Converting to Markdown and back loses the formatting. Edit it in place with python-docx. Fedora does
+not package python-docx: there, edit the XML as described for tracked changes below.
 
 ```python
 from docx import Document

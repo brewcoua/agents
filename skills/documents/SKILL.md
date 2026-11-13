@@ -29,14 +29,16 @@ Read the reference for the format at hand, and only that one:
    pdftoppm -png -r 80 -f 1 -l 3 out/report.pdf out/page              # out/page-1.png ...
    ```
    Check layout, overflowing text, empty pages and broken tables, not just that the command exited 0.
-4. LibreOffice (`soffice`) allows one instance per profile. Two conversions at once, or a LibreOffice
-   window open, make it fail silently. Run conversions one at a time, or give each its own profile:
-   `soffice -env:UserInstallation=file:///tmp/lo-$$ --headless ...`.
+4. LibreOffice (`soffice`) allows one instance per profile. With a conversion running, or a
+   LibreOffice window open, another conversion writes nothing and exits 1 with no message. Run
+   conversions one at a time, or give each its own profile and delete it after:
+   `soffice -env:UserInstallation=file:///tmp/lo-$$ --headless ...`, then `rm -r /tmp/lo-$$`.
 5. Keep generated scripts out of the user's project. Put them in a temporary directory.
 
 ## Converting
 
-`soffice --headless --convert-to <ext> --outdir <dir> <file>` converts between any formats LibreOffice
-opens: `pdf`, `docx`, `odt`, `xlsx`, `ods`, `csv`, `pptx`, `odp`, `html`. Legacy `.doc`, `.xls` and
-`.ppt` go through it first. `pandoc` converts between Markdown, HTML and `.docx` and writes `.pptx`;
-it does not read PDFs.
+`soffice --headless --convert-to <ext> --outdir <dir> <file>` converts within one kind of document,
+and to `pdf` from any: text (`docx`, `odt`, `doc`, `html`), spreadsheets (`xlsx`, `ods`, `xls`, `csv`),
+slides (`pptx`, `odp`, `ppt`). Across kinds, a `.docx` to `.xlsx` say, it writes nothing and exits 1
+with no message. Legacy `.doc`, `.xls` and `.ppt` go through it first. `pandoc` converts between
+Markdown, HTML and `.docx` and writes `.pptx`; it does not read PDFs.

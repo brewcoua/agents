@@ -10,8 +10,13 @@ soffice --headless --convert-to pdf --outdir out/ in.pptx
 pdftotext -layout out/in.pdf -
 ```
 
-Speaker notes are not in the PDF. They are in `ppt/notesSlides/notesSlideN.xml` inside the file:
-`unzip -p in.pptx ppt/notesSlides/notesSlide3.xml`, then the text inside `<a:t>` elements.
+Speaker notes are not in the PDF. They are in `ppt/notesSlides/`, numbered in their own order, not
+the slides': a slide without notes has no file. Slide N's `.rels` names its notes file, if any:
+
+```sh
+unzip -p in.pptx ppt/slides/_rels/slide3.xml.rels | grep -o 'notesSlide[0-9]*\.xml'
+unzip -p in.pptx ppt/notesSlides/notesSlide2.xml | grep -o '<a:t>[^<]*</a:t>'
+```
 
 ## Create
 
