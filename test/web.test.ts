@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { decode, formatResults, page, title, toText } from "../home/.pi/agent/extensions/web/html.ts"
+import { decode, formatResults, page, title, toText } from "../extensions/web/html.ts"
 
 test("entities decode once, numeric and named", () => {
   assert.equal(decode("a &amp;lt; b &#x41;&#66; &nbsp;&hellip; &bogus;"), "a &lt; b AB  … &bogus;")

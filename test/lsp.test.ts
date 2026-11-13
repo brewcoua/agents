@@ -4,8 +4,8 @@ import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
-import { Client } from "../home/.pi/agent/extensions/lsp/client.ts"
-import { Parser, SERVERS, candidates, findRoot, formatDiagnostics, frame } from "../home/.pi/agent/extensions/lsp/lsp.ts"
+import { Client } from "../extensions/lsp/client.ts"
+import { Parser, SERVERS, candidates, findRoot, formatDiagnostics, frame } from "../extensions/lsp/lsp.ts"
 
 const d = (line: number, severity: number, message: string, source?: string) => ({
   range: { start: { line, character: 2 } },

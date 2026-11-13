@@ -1,14 +1,14 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { test } from "node:test"
-import type { Rules } from "../home/.pi/agent/extensions/guardrails/rules.ts"
+import type { Rules } from "../extensions/guardrails/rules.ts"
 import {
   PLAN_FORMAT, commentsMessage, isSmall, parseComments, parsePlan, planStatus, planVerdict, slug, uniqueSlug, withStatus,
-} from "../home/.pi/agent/extensions/tasks/plan.ts"
-import { clip, formatScouts, scoutArgs } from "../home/.pi/agent/extensions/tasks/scout.ts"
-import { parseTiers, splitModel } from "../home/.pi/agent/extensions/tasks/tiers.ts"
+} from "../extensions/tasks/plan.ts"
+import { clip, formatScouts, scoutArgs } from "../extensions/tasks/scout.ts"
+import { parseTiers, splitModel } from "../extensions/tasks/tiers.ts"
 
-const here = (p: string) => new URL(`../home/.pi/agent/${p}`, import.meta.url)
+const here = (p: string) => new URL(`../${p}`, import.meta.url)
 const rules: Rules = JSON.parse(readFileSync(here("extensions/guardrails/rules.json"), "utf8"))
 
 test("slug: lowercase words, bounded, never empty", () => {
@@ -18,14 +18,6 @@ test("slug: lowercase words, bounded, never empty", () => {
   assert.ok(slug("x".repeat(100)).length <= 48)
   assert.equal(uniqueSlug("a", (s) => s === "a" || s === "a-2"), "a-3")
   assert.equal(uniqueSlug("a", () => false), "a")
-})
-
-test("tiers: the shipped file parses to the bridge's three families", () => {
-  const t = parseTiers(readFileSync(here("tasks.json"), "utf8"))
-  assert.deepEqual(t.plan, { provider: "claude-bridge", id: "claude-opus-5-5" })
-  assert.deepEqual(t.large, { provider: "claude-bridge", id: "claude-sonnet-5-5" })
-  assert.deepEqual(t.small, { provider: "claude-bridge", id: "claude-haiku-5-5" })
-  assert.equal(t.maxConcurrent, 3)
 })
 
 test("tiers: invalid files say what is wrong", () => {

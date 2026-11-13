@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { capDiff, parseArgs } from "../home/.pi/agent/extensions/simplify/diff.ts"
+import { capDiff, parseArgs } from "../extensions/simplify/diff.ts"
 
 const file = (name: string, body: string) => `diff --git a/${name} b/${name}\n--- a/${name}\n+++ b/${name}\n@@ -1 +1 @@\n${body}\n`
 

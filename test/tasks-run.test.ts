@@ -1,11 +1,11 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { parsePlan } from "../home/.pi/agent/extensions/tasks/plan.ts"
+import { parsePlan } from "../extensions/tasks/plan.ts"
 import {
   type RunPlan, type RunTask, answer, childArgs, childEnv, childPrompt, compile, filesOutside, finishCommand, nextBatch,
   overlap, safeId, start, tierFor, validate,
-} from "../home/.pi/agent/extensions/tasks/run.ts"
-import { type IO, runPlan } from "../home/.pi/agent/extensions/tasks/runner.ts"
+} from "../extensions/tasks/run.ts"
+import { type IO, runPlan } from "../extensions/tasks/runner.ts"
 
 const task = (id: string, o: Partial<RunTask> = {}): RunTask => ({
   id, title: `t${id}`, deps: [], files: [`${id}.txt`], tier: "small", verify: `v${id}`, accept: "ok", status: "pending", ...o,

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict"
 import { existsSync, readFileSync } from "node:fs"
 import { test } from "node:test"
-import { checkPath, type Rules } from "../home/.pi/agent/extensions/guardrails/rules.ts"
-import { READ_ONLY, onlyReadOnly, parseArgs, transcript } from "../home/.pi/agent/extensions/btw/side.ts"
+import { checkPath, type Rules } from "../extensions/guardrails/rules.ts"
+import { READ_ONLY, onlyReadOnly, parseArgs, transcript } from "../extensions/btw/side.ts"
 
 test("parseArgs: trimmed question, or nothing", () => {
   assert.equal(parseArgs("  what is this?  "), "what is this?")
@@ -30,9 +30,9 @@ test("transcript: user and assistant text only, newest characters kept", () => {
 
 test("guardrails path rules refuse what the side session's tools would read", () => {
   const rules: Rules = JSON.parse(
-    readFileSync(new URL("../home/.pi/agent/extensions/guardrails/rules.json", import.meta.url), "utf8"),
+    readFileSync(new URL("../extensions/guardrails/rules.json", import.meta.url), "utf8"),
   )
   assert.equal(checkPath(rules, "/work", "/home/u", ".env").verdict, "deny")
   assert.equal(checkPath(rules, "/work", "/home/u", "/work/src/a.ts").verdict, "allow")
-  assert.ok(existsSync(new URL("../home/.pi/agent/extensions/guardrails/index.ts", import.meta.url)))
+  assert.ok(existsSync(new URL("../extensions/guardrails/index.ts", import.meta.url)))
 })

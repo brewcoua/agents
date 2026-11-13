@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { type Limits, addOther, check, fresh, num, own, readReport, record, status, summary } from "../home/.pi/agent/extensions/budget/limits.ts"
+import { type Limits, addOther, check, fresh, num, own, readReport, record, status, summary } from "../extensions/budget/limits.ts"
 
 const L: Limits = { usd: 2, tokens: 1000 }
 

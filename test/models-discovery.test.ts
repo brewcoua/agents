@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { bearer, buildEntry, parseModelIds, parseShow, showUrl } from "../home/.pi/agent/extensions/models-discovery/discovery.ts"
+import { bearer, buildEntry, parseModelIds, parseShow, showUrl } from "../extensions/models-discovery/discovery.ts"
 
 test("parseModelIds: ids only, junk ignored", () => {
   assert.deepEqual(parseModelIds({ data: [{ id: "a:1b" }, { id: "" }, {}, null, { id: 3 }, { id: "b" }] }), ["a:1b", "b"])

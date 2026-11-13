@@ -12,10 +12,10 @@ import {
   taskGit,
   toolVerdict,
   type Rules,
-} from "../home/.pi/agent/extensions/guardrails/rules.ts"
+} from "../extensions/guardrails/rules.ts"
 
 const rules: Rules = JSON.parse(
-  readFileSync(new URL("../home/.pi/agent/extensions/guardrails/rules.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../extensions/guardrails/rules.json", import.meta.url), "utf8"),
 )
 const verdict = (c: string) => checkCommand(rules, c, "/work").verdict
 const files: Record<string, string> = { "/m.txt": "fix\n\nCo-Authored-By: x", "/ok.txt": "fix: retry" }

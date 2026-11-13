@@ -9,7 +9,7 @@ import {
   slug,
   upsertIndex,
   type Memory,
-} from "../home/.pi/agent/extensions/memory/memory.ts"
+} from "../extensions/memory/memory.ts"
 
 const m: Memory = { name: "Commit on master", description: "never branch\nbefore commit", type: "feedback", body: "Why: user rule.\n" }
 
