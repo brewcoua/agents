@@ -6,7 +6,7 @@ import type { Agent } from "./fleet.ts"
 export const META = "agent" // custom entry written when the session is created
 export const END = "agent-end" // written each time the agent ends; the last one counts
 
-const META_KEYS = ["id", "handle", "type", "description", "parent", "depth", "cwd", "worktree", "branch"] as const
+const META_KEYS = ["id", "handle", "type", "description", "parent", "depth", "owner", "cwd", "worktree", "branch"] as const
 const END_KEYS = ["status", "error", "turns", "tokens", "cost"] as const
 const pick = <K extends keyof Agent>(a: Agent, keys: readonly K[]) => Object.fromEntries(keys.map((k) => [k, a[k]])) as Pick<Agent, K>
 

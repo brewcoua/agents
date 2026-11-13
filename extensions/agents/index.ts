@@ -19,7 +19,7 @@ function transcript(ctx: ExtensionContext, spawner: Spawner, a: Agent) {
     return {
       render(width: number) {
         const border = new DynamicBorder((s: string) => theme.fg("accent", s))
-        const keys = [live(a) && "enter steer", live(a) && (stopArmed ? "x again to stop" : "x x stop"), live(a) && !a.background && "b background", "esc close"]
+        const keys = [live(a) && "enter steer", live(a) && (stopArmed ? "x again to stop" : "x x stop"), live(a) && !a.background && !a.owner && "b background", "esc close"]
         const body = new Markdown(conversation(spawner.messages(a.id) as Message[]) || " ", 1, 1, getMarkdownTheme())
         // Following: the newest lines, as many as fit with the head and foot.
         const lines = body.render(width).slice(-Math.max(3, Math.floor(tui.terminal.rows * 0.8) - 4))
@@ -53,6 +53,8 @@ async function open(ctx: ExtensionContext, spawner: Spawner, a: Agent) {
 export default function (pi: ExtensionAPI) {
   const spawner = new Spawner(pi)
   for (const t of spawner.tools({ id: "main", depth: 0 })) pi.registerTool(t)
+  // Other extensions start their agents here: emit "agents:spawner" with a callback.
+  pi.events.on("agents:spawner", (reply) => (reply as (s: Spawner) => void)(spawner))
 
   pi.on("session_start", (_e, ctx) => {
     const { errors } = spawner.bind(ctx)
@@ -92,7 +94,7 @@ export default function (pi: ExtensionAPI) {
     // agents, and is the editor's cursor-left otherwise.
     ctx.ui.onTerminalInput((data) => {
       if (selected === undefined) {
-        const foreground = spawner.agents.filter((a) => a.parent === "main" && a.status === "running" && !a.background)
+        const foreground = spawner.agents.filter((a) => a.parent === "main" && a.status === "running" && !a.background && !a.owner)
         if (matchesKey(data, "ctrl+b") && foreground.length) {
           for (const a of foreground) spawner.background(a)
           return { consume: true }

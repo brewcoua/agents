@@ -10,6 +10,7 @@ import { Type } from "typebox"
 import { USAGE_EVENT } from "../budget/limits.ts"
 import { loadActive, loadProfiles, showModel, splitModel } from "../lib/profiles.ts"
 import { guardrails } from "../guardrails/index.ts"
+import type { Env } from "../guardrails/rules.ts"
 import { runtimeFor } from "../lib/session.ts"
 import { WORKTREES_DIR, git, kill, treeOf } from "../tasks/git.ts"
 import { type Def, defDirs, loadDefs } from "./defs.ts"
@@ -75,6 +76,19 @@ type Start = {
   isolation?: "off" | "worktree"
 }
 
+// An agent another extension starts (scouts, /tasks children), of a definition of its own.
+export type Owned = {
+  owner: string
+  def: Def
+  prompt: string
+  description: string
+  cwd?: string
+  tools?: ToolDefinition<any, any>[]
+  guard?: Pick<Env, "taskFiles" | "taskVerify">
+  tree?: string // OTHALA_TASK_TREE for its processes
+  timeoutMs?: number
+}
+
 export class Spawner {
   agents: Agent[] = []
   sessions = new Map<string, AgentSession>()
@@ -83,6 +97,7 @@ export class Spawner {
   private transcripts = new Map<string, AgentSession["messages"]>() // of ended agents
   private waiters = new Map<string, (() => void)[]>()
   private pending = new Map<string, Agent[]>() // children's results a parent agent gets as its next prompt
+  private owned = new Map<string, Owned>()
   private claimed = new Set<string>() // agents an agent_result call waits on: their result goes there only
   private ctx?: ExtensionContext
   private closed = false
@@ -147,11 +162,26 @@ export class Spawner {
     return a
   }
 
+  // An agent for another extension: the model is not offered its type, and its result is not
+  // delivered; the caller waits for it. It queues with the rest and shows in the fleet.
+  spawn(o: Owned): Agent {
+    const a: Agent = {
+      id: randomUUID().slice(0, 8), handle: newHandle(this.agents, o.def.name) as string, type: o.def.name, description: o.description,
+      parent: "main", depth: 1, background: false, owner: o.owner, status: "queued", turns: 0, tokens: 0, cost: 0,
+    }
+    this.agents.push(a)
+    this.owned.set(a.id, o)
+    this.prompts.set(a.id, { type: o.def.name, prompt: o.prompt, description: o.description })
+    this.pump()
+    return a
+  }
+
   // Reopens an ended agent's session with a new prompt; its turns, tokens and handle carry on.
   private async resume(p: Start): Promise<Agent | string> {
     const a = find(this.agents, p.resume as string)
     if (!a) return `No agent ${p.resume}.`
     if (live(a)) return `Agent ${a.handle} is ${a.status}; steer it with agent_steer instead.`
+    if (a.owner) return `Agent ${a.handle} was started by ${a.owner} and cannot be resumed.`
     if (!a.sessionFile || !existsSync(a.sessionFile)) return `Agent ${a.handle} has no saved session to resume.`
     if (!this.defs.has(a.type)) return `Agent type ${a.type} no longer exists.`
     if (a.worktree) {
@@ -178,8 +208,10 @@ export class Spawner {
 
   private async run(a: Agent) {
     const p = this.prompts.get(a.id) as Start
-    const def = this.defs.get(a.type) as Def
+    const o = this.owned.get(a.id)
+    const def = o?.def ?? (this.defs.get(a.type) as Def)
     const ctx = this.ctx as ExtensionContext
+    const timer = o?.timeoutMs ? setTimeout(() => (live(a) && (a.error = "time limit"), this.stop(a.id)), o.timeoutMs) : undefined
     try {
       const ref = p.model ? splitModel(p.model) : loadActive(getAgentDir()).roles[def.role]
       const model = ctx.modelRegistry.find(ref.provider, ref.id)
@@ -215,13 +247,14 @@ export class Spawner {
       if (a.status === "running") a.status = "failed"
       a.error = e instanceof Error ? e.message : String(e)
     }
+    clearTimeout(timer)
     if (a.worktree) await this.commit(a)
     this.finish(a)
   }
 
   // Where the agent works: its parent's directory, or a new worktree of it on its own branch.
   private async place(a: Agent, isolation: "off" | "worktree", ctx: ExtensionContext) {
-    const base = a.parent === "main" ? ctx.cwd : (find(this.agents, a.parent)?.cwd ?? ctx.cwd)
+    const base = this.owned.get(a.id)?.cwd ?? (a.parent === "main" ? ctx.cwd : (find(this.agents, a.parent)?.cwd ?? ctx.cwd))
     a.cwd = base
     if (isolation !== "worktree") return
     const dir = join(ctx.cwd, WORKTREES_DIR, `agent-${a.id}`)
@@ -242,6 +275,7 @@ export class Spawner {
 
   private async open(a: Agent, def: Def, model: NonNullable<ExtensionContext["model"]>, ctx: ExtensionContext) {
     const p = this.prompts.get(a.id) as Start
+    const o = this.owned.get(a.id)
     const cwd = a.cwd ?? ctx.cwd
     const settingsManager = SettingsManager.create(cwd, getAgentDir())
     const extensions = [...new Set((def.tools ?? []).flatMap((t) => (TOOL_EXTENSIONS[t] ? [extensionPath(TOOL_EXTENSIONS[t])] : [])))]
@@ -251,7 +285,7 @@ export class Spawner {
       settingsManager,
       additionalExtensionPaths: extensions,
       // Its own guardrails, with the type's commands: agents share this process's environment.
-      extensionFactories: [guardrails({ bash: def.bash })],
+      extensionFactories: [guardrails({ bash: def.bash, ...o?.guard })],
       // Other packages' extensions stay: claude-bridge must see the agent's prompt to serve it.
       // Of ours, only the tools the type names; no UI, commands or nested hooks.
       extensionsOverride: (base) => ({ ...base, extensions: base.extensions.filter((e) => !ours(e.resolvedPath) || extensions.includes(e.resolvedPath)) }),
@@ -278,6 +312,7 @@ export class Spawner {
       }
     }
     const nested = def.allowedAgents.length && a.depth < MAX_DEPTH ? this.tools({ id: a.id, depth: a.depth }) : []
+    const extra = [...nested, ...(o?.tools ?? [])]
     const { session } = await createAgentSession({
       cwd,
       model,
@@ -287,14 +322,14 @@ export class Spawner {
       settingsManager,
       sessionManager,
       // An allowlist disables every tool it does not name, the agent tools included.
-      ...(def.tools ? { tools: [...def.tools, ...nested.map((t) => t.name)] } : {}),
-      customTools: [...nested, this.bash(a, cwd, settingsManager)],
+      ...(def.tools ? { tools: [...def.tools, ...extra.map((t) => t.name)] } : {}),
+      customTools: [...extra, this.bash(a, cwd, settingsManager)],
     })
     await session.bindExtensions({})
     return session
   }
 
-  private tree = (a: Agent) => treeOf(this.ctx?.cwd ?? "", `agent-${a.id}`)
+  private tree = (a: Agent) => this.owned.get(a.id)?.tree ?? treeOf(this.ctx?.cwd ?? "", `agent-${a.id}`)
 
   // Pi's bash, marking what the agent runs so that stopping it kills those processes too.
   private bash(a: Agent, cwd: string, settings: SettingsManager) {
@@ -388,7 +423,7 @@ export class Spawner {
 
   // A foreground agent's caller stops waiting; the result comes as a background one's does.
   background(a: Agent) {
-    if (a.status !== "running" || a.background) return false
+    if (a.status !== "running" || a.background || a.owner) return false
     a.background = true
     for (const w of this.waiters.get(a.id) ?? []) w()
     this.waiters.delete(a.id)

@@ -5,7 +5,7 @@ import type { Rules } from "../extensions/guardrails/rules.ts"
 import {
   PLAN_FORMAT, commentsMessage, isSmall, parseComments, parsePlan, planStatus, planVerdict, slug, uniqueSlug, withStatus,
 } from "../extensions/tasks/plan.ts"
-import { clip, formatScouts, scoutArgs } from "../extensions/tasks/scout.ts"
+import { SCOUT, clip, formatScouts } from "../extensions/tasks/scout.ts"
 
 const here = (p: string) => new URL(`../${p}`, import.meta.url)
 const rules: Rules = JSON.parse(readFileSync(here("extensions/guardrails/rules.json"), "utf8"))
@@ -133,24 +133,21 @@ test("plan mode: tools", () => {
   for (const t of ["memory_save", "mcp__x__y", "codemode"]) assert.equal(v(t), "deny", t)
 })
 
-test("scout: a read-only child pi on the small tier", () => {
-  const args = scoutArgs({ provider: "claude-bridge", id: "claude-haiku-5-5" }, "where is X?")
-  assert.deepEqual(args.slice(0, 4), ["-p", "--no-session", "--no-mcp", "-na"])
-  assert.equal(args[args.indexOf("-t") + 1], "read,grep,find,ls")
-  assert.equal(args[args.indexOf("--provider") + 1], "claude-bridge")
-  assert.equal(args[args.indexOf("--model") + 1], "claude-haiku-5-5")
-  assert.match(args.at(-1)!, /Question: where is X\?$/)
+test("scout: a read-only agent on the small role", () => {
+  assert.deepEqual([SCOUT.role, SCOUT.tools, SCOUT.allowedAgents], ["small", ["read", "grep", "find", "ls"], []])
 })
 
 test("scout results: text, failures, and the output cap", () => {
   assert.equal(clip("abc", 5), "abc")
   assert.match(clip("abcdef", 3), /^abc\n\[cut: 3 more/)
-  const out = formatScouts(["q1", "q2", "q3"], [
-    { code: 0, killed: false, stdout: "found it\n", stderr: "" },
-    { code: 1, killed: false, stdout: "", stderr: "boom\n" },
-    { code: null, killed: true, stdout: "", stderr: "" },
+  const out = formatScouts(["q1", "q2", "q3", "q4"], [
+    { status: "done", result: "found it\n" },
+    { status: "failed", error: "boom" },
+    { status: "stopped", error: "time limit" },
+    { status: "done", result: "" },
   ])
   assert.match(out, /## Scout 1: q1\nfound it$/m)
-  assert.match(out, /## Scout 2: q2\nfailed \(exit 1\): boom/)
-  assert.match(out, /## Scout 3: q3\nfailed: timed out/)
+  assert.match(out, /## Scout 2: q2\nfailed: boom/)
+  assert.match(out, /## Scout 3: q3\nfailed: time limit/)
+  assert.match(out, /## Scout 4: q4\n\(no output\)/)
 })

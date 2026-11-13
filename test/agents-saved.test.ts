@@ -12,7 +12,7 @@ const entry = (customType: string, data: unknown) => ({ type: "custom", customTy
 test("an agent round-trips through its session's entries, the last end winning", () => {
   const entries = [{ type: "message" }, entry(META, meta(agent)), entry(END, { ...end(agent), status: "stopped" }), entry(END, end(agent))]
   assert.deepEqual(restore(entries, "/s/7.jsonl", "a.ts:1"), {
-    id: "7", handle: "scout-1", type: "scout", description: "find x", parent: "main", depth: 1, cwd: "/p", worktree: "/p/.pi/worktrees/agent-7", branch: "agent-7",
+    id: "7", handle: "scout-1", type: "scout", description: "find x", parent: "main", depth: 1, owner: undefined, cwd: "/p", worktree: "/p/.pi/worktrees/agent-7", branch: "agent-7",
     background: true, status: "done", error: undefined, turns: 3, tokens: 900, cost: 0.02, result: "a.ts:1", sessionFile: "/s/7.jsonl",
   })
 })

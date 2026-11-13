@@ -10,6 +10,7 @@ export type Agent = {
   parent: string // "main" or an agent id
   depth: number // 1 for an agent started by main
   background: boolean
+  owner?: string // the extension that started it and waits for it (Spawner.spawn)
   status: Status
   startedAt?: number
   endedAt?: number

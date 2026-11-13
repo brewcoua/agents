@@ -1,21 +1,21 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { basename, join } from "node:path"
 import { Type } from "typebox"
-import { tmpdir } from "node:os"
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import { USAGE_EVENT } from "../budget/limits.ts"
 import rules from "../guardrails/rules.json"
 import type { Rules } from "../guardrails/rules.ts"
 import { edit } from "../lib/editor.ts"
 import { showList } from "../lib/view.ts"
-import { WORKTREES_DIR, gitIO, killRun, takeUsage } from "./git.ts"
+import type { Spawner } from "../agents/runtime.ts"
+import { WORKTREES_DIR, gitIO, killRun } from "./git.ts"
 import {
   PLANS_DIR, commentsMessage, implementMessage, isSmall, parseComments, parsePlan,
   planPrompt, planStatus, planVerdict, slug, uniqueSlug, withStatus,
 } from "./plan.ts"
 import { type RunPlan, type RunTask, compile, start, summary } from "./run.ts"
 import { runPlan } from "./runner.ts"
-import { MAX_SCOUTS, SCOUT_TIMEOUT_MS, formatScouts, scoutArgs } from "./scout.ts"
+import { MAX_SCOUTS, SCOUT, SCOUT_TIMEOUT_MS, formatScouts } from "./scout.ts"
 import { type Model, loadActive, loadProfiles } from "../lib/profiles.ts"
 
 const R = rules as Rules
@@ -56,6 +56,12 @@ const unlock = (cwd: string, token: string) => {
 }
 
 export default function (pi: ExtensionAPI) {
+  // The agents extension's spawner, if it is loaded: scouts and task children are its agents.
+  const agents = () => {
+    let s: Spawner | undefined
+    pi.events.emit("agents:spawner", (x: Spawner) => (s = x))
+    return s
+  }
   const token = `${process.pid} ${Math.random().toString(36).slice(2)}`
   let state: State | undefined
 
@@ -357,21 +363,17 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       questions: Type.Array(Type.String(), { minItems: 1, maxItems: MAX_SCOUTS, description: "One self-contained question per scout" }),
     }),
-    async execute(_id, p, signal, _update, ctx) {
-      const { small } = loadTiers().roles
-      // pi.exec takes no environment, so env(1) passes the budget report file.
-      const results = await Promise.all(
-        p.questions.map(async (q, i) => {
-          const file = join(tmpdir(), `pi-scout-${process.pid}-${Date.now()}-${i}.json`)
-          const r = await pi.exec("env", [`OTHALA_BUDGET_REPORT=${file}`, "pi", ...scoutArgs(small, q)], {
-            cwd: ctx.cwd, signal, timeout: SCOUT_TIMEOUT_MS, maxBuffer: 1 << 20,
-          })
-          const u = takeUsage(file)
-          if (u) pi.events.emit(USAGE_EVENT, { source: "scouts", ...u })
-          return r
-        }),
+    async execute(_id, p, signal) {
+      const spawner = agents()
+      if (!spawner) return { content: [{ type: "text" as const, text: "Scouts are agents, and the agents extension is not loaded." }], details: {} }
+      const scouts = p.questions.map((q) =>
+        spawner.spawn({ owner: "plan", def: SCOUT, prompt: q, description: q.split(/\s+/).slice(0, 5).join(" "), timeoutMs: SCOUT_TIMEOUT_MS }),
       )
-      return { content: [{ type: "text" as const, text: formatScouts(p.questions, results) }], details: {} }
+      const stop = () => scouts.forEach((a) => spawner.stop(a.id))
+      signal?.addEventListener("abort", stop, { once: true })
+      await Promise.all(scouts.map((a) => spawner.wait(a)))
+      signal?.removeEventListener("abort", stop)
+      return { content: [{ type: "text" as const, text: formatScouts(p.questions, scouts) }], details: {} }
     },
   })
 }
