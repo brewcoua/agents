@@ -90,7 +90,7 @@ export function check(t: Totals, l: Limits): { kind: "stop" | "warn"; level: num
 
 export const usd = (n: number) => `$${n.toFixed(2)}`
 export const count = (n: number) => n.toLocaleString("en-US")
-const short = (n: number) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
+export const short = (n: number) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
 
 // The status line: the share of the nearest cap, then what is counted against each.
 export function status(t: Totals, l: Limits): string {

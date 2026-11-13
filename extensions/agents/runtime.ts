@@ -60,6 +60,7 @@ export class Spawner {
   private waiters = new Map<string, (() => void)[]>()
   private ctx?: ExtensionContext
   private closed = false
+  onRunning = () => {} // the set of running agents changed
 
   constructor(private pi: ExtensionAPI) {}
 
@@ -105,6 +106,7 @@ export class Spawner {
       a.startedAt = Date.now()
       void this.run(a)
     }
+    this.onRunning()
   }
 
   private async run(a: Agent) {

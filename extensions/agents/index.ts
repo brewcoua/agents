@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { showList } from "../lib/view.ts"
 import { Spawner } from "./runtime.ts"
+import { widget } from "./view.ts"
 
 export default function (pi: ExtensionAPI) {
   const spawner = new Spawner(pi)
@@ -9,6 +10,23 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_e, ctx) => {
     const { errors } = spawner.bind(ctx)
     if (errors.length) ctx.ui.notify(`agents: skipped\n${errors.join("\n")}`, "warning")
+    if (!ctx.hasUI) return
+    // Shown while an agent runs; its own timer turns the spinner and picks up tool and token changes.
+    let shown = false
+    spawner.onRunning = () => {
+      const running = spawner.agents.some((a) => a.status === "running")
+      if (running === shown) return
+      shown = running
+      if (!running) return ctx.ui.setWidget("agents", undefined)
+      ctx.ui.setWidget("agents", (tui, theme) => {
+        let frame = 0
+        const timer = setInterval(() => {
+          frame++
+          tui.requestRender()
+        }, 100)
+        return { render: (width: number) => widget(spawner.agents, frame, width, (c, s) => theme.fg(c as never, s)), invalidate() {}, dispose: () => clearInterval(timer) }
+      })
+    }
   })
   // Agents live in this process; they go with the session.
   pi.on("session_shutdown", () => spawner.shutdown())
