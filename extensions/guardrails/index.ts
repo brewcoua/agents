@@ -1,6 +1,7 @@
 import { readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
+import { showList } from "../lib/view.ts"
 import rules from "./rules.json"
 import { type Env, type Rules, cap, decide, toolVerdict } from "./rules.ts"
 
@@ -37,15 +38,27 @@ function realpath(path: string): string {
 
 const env: Env = { home: homedir(), readFile, realpath, taskFiles: TASK_FILES, taskVerify: process.env.OTHALA_TASK_VERIFY }
 
+// What this session asked about or refused, newest last, for /guardrails.
+type Logged = { time: Date; what: string; reason: string; outcome: "denied" | "allowed by you" | "declined by you" | "refused, no UI" }
+const LOG_MAX = 200
+const log: Logged[] = []
+const note = (e: Logged) => log.push(e) > LOG_MAX && log.shift()
+
 async function enforce(toolName: string, input: Record<string, unknown>, ctx: ExtensionContext) {
   const d = decide(R, env, toolName, input, ctx.cwd)
   if (d.verdict === "allow") return undefined
-  if (d.verdict === "deny") return { block: true, reason: `Blocked by guardrails: ${d.reason}.` }
+  const what = toolName === "bash" ? String(input.command) : `${toolName} ${String(input.path ?? input.file_path ?? "")}`
+  const time = new Date()
+  if (d.verdict === "deny") {
+    note({ time, what, reason: d.reason, outcome: "denied" })
+    return { block: true, reason: `Blocked by guardrails: ${d.reason}.` }
+  }
   if (!ctx.hasUI) {
+    note({ time, what, reason: d.reason, outcome: "refused, no UI" })
     return { block: true, reason: `Blocked by guardrails: ${d.reason}, and there is no UI to ask the user. Run it yourself or change the approach.` }
   }
-  const what = toolName === "bash" ? String(input.command) : `${toolName} ${String(input.path ?? "")}`
   const ok = await ctx.ui.confirm("Allow?", `${what}\n\n${d.reason}`)
+  note({ time, what, reason: d.reason, outcome: ok ? "allowed by you" : "declined by you" })
   return ok ? undefined : { block: true, reason: "Blocked by guardrails: the user declined." }
 }
 
@@ -61,6 +74,23 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", hide)
 
   pi.on("tool_call", (event, ctx) => enforce(event.toolName, event.input, ctx))
+
+  pi.registerCommand("guardrails", {
+    description: "What guardrails asked about or refused in this Pi, newest first",
+    handler: async (_args, ctx) => {
+      const hhmm = (d: Date) => d.toTimeString().slice(0, 8)
+      await showList(ctx, {
+        title: "Guardrails",
+        empty: "Nothing was asked about or refused yet.",
+        rows: () =>
+          [...log].reverse().map((e) => ({
+            label: `${hhmm(e.time)} ${e.outcome.padEnd(15)} ${e.what.replace(/\s+/g, " ")}`,
+            dim: e.outcome === "allowed by you",
+            detail: () => `${e.outcome} at ${hhmm(e.time)}\n\nreason: ${e.reason}\n\n${e.what}`,
+          })),
+      })
+    },
+  })
 
   pi.on("tool_result", (event) => {
     let changed = false

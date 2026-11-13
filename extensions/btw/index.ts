@@ -13,6 +13,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent"
 import { Container, Markdown, Text, matchesKey } from "@earendil-works/pi-tui"
+import { USAGE_EVENT, type Usage } from "../budget/limits.ts"
 import { READ_ONLY, SYSTEM, onlyReadOnly, parseArgs, transcript } from "./side.ts"
 
 // Characters of the main conversation handed to the side session.
@@ -65,7 +66,7 @@ async function openSession(ctx: ExtensionContext, model: NonNullable<ExtensionCo
   return session
 }
 
-async function ask(question: string, ctx: ExtensionContext) {
+async function ask(question: string, ctx: ExtensionContext, report: (u: Usage) => void) {
   const model = ctx.model
   if (ctx.mode !== "tui") return ctx.ui.notify("/btw needs the interactive UI", "error")
   if (!model) return ctx.ui.notify("/btw: no model selected", "error")
@@ -80,8 +81,10 @@ async function ask(question: string, ctx: ExtensionContext) {
     let status = "thinking"
     let session: AgentSession | undefined
     let closed = false
+    const used: Usage = { cost: 0, tokens: 0 }
 
     const close = () => {
+      if (!closed) report(used)
       closed = true
       void session?.abort().finally(() => session?.dispose())
       done()
@@ -96,6 +99,9 @@ async function ask(question: string, ctx: ExtensionContext) {
           if (e.type === "message_update" && e.assistantMessageEvent.type === "text_delta") {
             body += e.assistantMessageEvent.delta
             status = "answering"
+          } else if (e.type === "message_end" && e.message.role === "assistant" && e.message.usage) {
+            used.cost += e.message.usage.cost.total
+            used.tokens += e.message.usage.input + e.message.usage.output
           } else if (e.type === "tool_execution_start") {
             status = `${e.toolName} ${JSON.stringify(e.args).slice(0, 60)}`
           }
@@ -129,12 +135,13 @@ async function ask(question: string, ctx: ExtensionContext) {
 }
 
 export default function (pi: ExtensionAPI) {
+  const report = (u: Usage) => pi.events.emit(USAGE_EVENT, { source: "btw", ...u })
   pi.registerCommand("btw", {
     description: "Ask a quick question in a read-only side session; the main run is not interrupted",
     handler: async (args, ctx) => {
       const question = parseArgs(args)
       if (!question) return ctx.ui.notify("usage: /btw <question>", "warning")
-      await ask(question, ctx)
+      await ask(question, ctx, report)
     },
   })
 
@@ -142,7 +149,7 @@ export default function (pi: ExtensionAPI) {
     description: "Ask a quick side question (/btw)",
     handler: async (ctx) => {
       const question = parseArgs((await ctx.ui.input("btw", "Quick question")) ?? "")
-      if (question) await ask(question, ctx)
+      if (question) await ask(question, ctx, report)
     },
   })
 }

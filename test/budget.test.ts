@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { type Limits, check, fresh, num, record, summary } from "../home/.pi/agent/extensions/budget/limits.ts"
+import { type Limits, addOther, check, fresh, num, own, readReport, record, status, summary } from "../home/.pi/agent/extensions/budget/limits.ts"
 
 const L: Limits = { usd: 2, tokens: 1000 }
 
@@ -50,4 +50,33 @@ test("env parsing", () => {
   assert.equal(num("abc", 2), 2)
   assert.equal(num("0", 2), 0)
   assert.equal(num("1.5", 2), 1.5)
+})
+
+test("usage of other sessions counts toward the caps, by source", () => {
+  const t = fresh()
+  record(t, "a", 0, 100)
+  addOther(t, "tasks", { cost: 0.5, tokens: 300 })
+  addOther(t, "tasks", { cost: 0, tokens: 100 })
+  addOther(t, "btw", { cost: 0, tokens: 50 })
+  assert.equal(t.tokens, 550)
+  assert.deepEqual(own(t), { cost: 0, tokens: 100 })
+  assert.deepEqual(t.others.get("tasks"), { cost: 0.5, tokens: 400 })
+  record(t, "a", 0, 150) // a message re-reported keeps the others
+  assert.equal(t.tokens, 600)
+})
+
+test("status line", () => {
+  const t = fresh()
+  record(t, "a", 0, 610_000)
+  assert.equal(status(t, { usd: 2, tokens: 5_000_000 }), "budget 12% · 610k/5M tok")
+  record(t, "b", 0.5, 1_000_000)
+  assert.equal(status(t, { usd: 2, tokens: 5_000_000 }), "budget 32% · 1.6M/5M tok · $0.50/$2.00")
+  assert.equal(status(t, { usd: 0, tokens: 0 }), "budget 0%")
+})
+
+test("child report file", () => {
+  assert.deepEqual(readReport('{"cost":0.1,"tokens":5}'), { cost: 0.1, tokens: 5 })
+  assert.equal(readReport(undefined), undefined)
+  assert.equal(readReport("{"), undefined)
+  assert.equal(readReport('{"cost":"x","tokens":5}'), undefined)
 })

@@ -1,9 +1,10 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { Type } from "typebox"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
-import { type Memory, SAVE_NUDGE, TYPES, format, indexLine, indexMessage, removeFromIndex, slug, upsertIndex } from "./memory.ts"
+import { showList } from "../lib/view.ts"
+import { type Memory, SAVE_NUDGE, TYPES, format, indexLine, indexMessage, parse, removeFromIndex, slug, upsertIndex } from "./memory.ts"
 
 // Context usage (percent of the window) from which the model is asked to save
 // before Pi compacts. Pi compacts near the end of the window, so this leaves room for one turn.
@@ -24,6 +25,28 @@ function readFile(path: string): string {
 }
 
 const ok = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} })
+
+function forget(dir: string, file: string) {
+  mkdirSync(dir, { recursive: true })
+  rmSync(join(dir, file), { force: true })
+  writeFileSync(join(dir, INDEX), removeFromIndex(readFile(join(dir, INDEX)), file))
+}
+
+type Entry = { scope: "global" | "project"; dir: string; file: string; text: string; memory?: Memory }
+
+function entries(cwd: string): Entry[] {
+  const d = dirs(cwd)
+  return (["project", "global"] as const).flatMap((scope) => {
+    let files: string[] = []
+    try {
+      files = readdirSync(d[scope]).filter((f) => f.endsWith(".md") && f !== INDEX).sort()
+    } catch {}
+    return files.map((file) => {
+      const text = readFile(join(d[scope], file))
+      return { scope, dir: d[scope], file, text, memory: parse(text) }
+    })
+  })
+}
 
 export default function (pi: ExtensionAPI) {
   let injected: string | undefined
@@ -95,11 +118,26 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_id, p, _signal, _update, ctx) {
       const file = `${slug(p.name)}.md`
-      const dir = dirs(ctx.cwd)[p.scope]
-      mkdirSync(dir, { recursive: true })
-      rmSync(join(dir, file), { force: true })
-      writeFileSync(join(dir, INDEX), removeFromIndex(readFile(join(dir, INDEX)), file))
+      forget(dirs(ctx.cwd)[p.scope], file)
       return ok(`Forgot ${p.scope}/${file}`)
+    },
+  })
+
+  pi.registerCommand("memory", {
+    description: "Browse the saved memories: enter shows one, d deletes it",
+    handler: async (_args, ctx) => {
+      let list = entries(ctx.cwd)
+      await showList(ctx, {
+        title: "Memory",
+        empty: "No memories yet, in ~/.pi/agent/memory/ or .pi/memory/.",
+        rows: () =>
+          (list = entries(ctx.cwd)).map((e) => ({
+            label: e.memory ? `${e.scope.padEnd(7)} ${e.memory.type.padEnd(9)} ${e.memory.name}: ${e.memory.description}` : `${e.scope.padEnd(7)} ${e.file} (unreadable)`,
+            detail: () => `${join(e.dir, e.file)}\n\n${e.text}`,
+          })),
+        actions: [{ key: "d", label: "delete", confirm: true, run: (_r, i) => forget(list[i].dir, list[i].file) }],
+      })
+      load(ctx.cwd) // the next request sees what was deleted
     },
   })
 }

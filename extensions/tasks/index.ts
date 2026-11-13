@@ -2,15 +2,18 @@ import { spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { basename, join } from "node:path"
 import { Type } from "typebox"
+import { tmpdir } from "node:os"
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import { USAGE_EVENT } from "../budget/limits.ts"
 import rules from "../guardrails/rules.json"
 import type { Rules } from "../guardrails/rules.ts"
-import { WORKTREES_DIR, gitIO, killRun } from "./git.ts"
+import { showList } from "../lib/view.ts"
+import { WORKTREES_DIR, gitIO, killRun, takeUsage } from "./git.ts"
 import {
   PLANS_DIR, commentsMessage, implementMessage, isSmall, parseComments, parsePlan,
   planPrompt, planStatus, planVerdict, slug, uniqueSlug, withStatus,
 } from "./plan.ts"
-import { type RunPlan, compile, start, summary } from "./run.ts"
+import { type RunPlan, type RunTask, compile, start, summary } from "./run.ts"
 import { runPlan } from "./runner.ts"
 import { MAX_SCOUTS, SCOUT_TIMEOUT_MS, formatScouts, scoutArgs } from "./scout.ts"
 import { type Model, parseTiers } from "./tiers.ts"
@@ -189,6 +192,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   let controller: AbortController | undefined
+  let current: string | undefined // the slug of the plan this instance is running
 
   // COMPILE (first time), then EXECUTE to FINISH; a task tree on disk is resumed. The run goes on
   // in the background, so the session stays usable and /tasks stop can reach it.
@@ -218,10 +222,16 @@ export default function (pi: ExtensionAPI) {
     // Interrupted tasks start over: whatever they left running is killed, prepare() resets their worktrees.
     start(run)
     killRun(ctx.cwd)
-    const io = gitIO(ctx.cwd, tiers, save, (m) => {
-      ctx.ui.setStatus("tasks", m)
-      if (!ctx.hasUI) ctx.ui.notify(m, "info")
-    })
+    const io = gitIO(
+      ctx.cwd,
+      tiers,
+      save,
+      (m) => {
+        ctx.ui.setStatus("tasks", m)
+        if (!ctx.hasUI) ctx.ui.notify(m, "info")
+      },
+      (u) => pi.events.emit(USAGE_EVENT, { source: "tasks", ...u }),
+    )
     save(run)
     mkdirSync(join(ctx.cwd, WORKTREES_DIR), { recursive: true })
     try {
@@ -231,6 +241,7 @@ export default function (pi: ExtensionAPI) {
       writeFileSync(lockFile(ctx.cwd), token) // stale
     }
     const c = (controller = new AbortController())
+    current = name
     ctx.ui.notify(`${name}: running. /tasks status shows the tasks, /tasks stop stops them.`, "info")
     void (async () => {
       try {
@@ -244,7 +255,7 @@ export default function (pi: ExtensionAPI) {
         save(run)
         ctx.ui.notify(`/tasks: ${e instanceof Error ? e.message : e}\nThe task file ${PLANS_DIR}/${name}.json holds the state; /tasks run resumes.`, "error")
       } finally {
-        if (controller === c) controller = undefined
+        if (controller === c) (controller = undefined), (current = undefined)
         unlock(ctx.cwd, token)
         ctx.ui.setStatus("tasks", undefined)
       }
@@ -278,12 +289,46 @@ export default function (pi: ExtensionAPI) {
     else await execute(name, ctx)
   }
 
+  // The live view of a plan's tasks, read from its task file once a second.
+  async function view(name: string, ctx: ExtensionCommandContext) {
+    if (!loadRun(ctx, name)) return ctx.ui.notify(`${name} has not been compiled yet. /tasks run ${name} does it.`, "info")
+    let tasks: RunTask[] = []
+    await showList(ctx, {
+      title: `Tasks: ${name}`,
+      empty: "The plan has no tasks.",
+      refreshMs: 1000,
+      rows: () => {
+        const run = loadRun(ctx, name)
+        tasks = run?.tasks ?? tasks
+        return tasks.map((t) => ({
+          label: `${t.status.padEnd(8)} ${t.id.padEnd(5)} ${t.title}${t.attempts ? `  (${t.attempts} failed)` : ""}`,
+          dim: t.status === "done" || t.status === "pending",
+          detail: () =>
+            [
+              `${t.id} ${t.title}: ${t.status}`,
+              `tier ${t.tier}, deps ${t.deps.join(", ") || "none"}`,
+              `files ${t.files.join(", ")}`,
+              `verify ${t.verify}`,
+              `accept ${t.accept}`,
+              ...(t.granted?.length ? ["", "granted:", ...t.granted.map((g) => `- ${g.files.join(", ")}: ${g.reason}`)] : []),
+              ...(t.notes ? ["", "notes:", t.notes] : []),
+            ].join("\n"),
+        }))
+      },
+      actions: current === name ? [{ key: "s", label: "stop the run", confirm: true, run: () => stop(ctx) }] : [],
+    })
+  }
+
   pi.registerCommand("tasks", {
-    description: "Run an approved plan's tasks in worktrees: /tasks run [slug] (also resumes), /tasks status [slug], /tasks stop",
+    description: "Run an approved plan's tasks in worktrees: /tasks [slug] (the view), /tasks run [slug] (also resumes), /tasks status [slug], /tasks stop",
     handler: async (args, ctx) => {
       const [sub, arg = ""] = args.trim().split(/\s+/)
       if (sub === "stop") return stop(ctx)
-      if (sub !== "run" && sub !== "status") return ctx.ui.notify("usage: /tasks run [slug] | /tasks status [slug] | /tasks stop", "info")
+      if (sub !== "run" && sub !== "status") {
+        // `/tasks`, `/tasks view [slug]` and `/tasks <slug>` open the view
+        const name = (sub === "view" ? arg : sub) || current || pick("", ctx)
+        return name ? view(name, ctx) : undefined
+      }
       const name = pick(arg, ctx)
       if (!name) return
       if (sub === "run") return execute(name, ctx)
@@ -335,10 +380,17 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_id, p, signal, _update, ctx) {
       const { small } = loadTiers()
+      // pi.exec takes no environment, so env(1) passes the budget report file.
       const results = await Promise.all(
-        p.questions.map((q) =>
-          pi.exec("pi", scoutArgs(small, q), { cwd: ctx.cwd, signal, timeout: SCOUT_TIMEOUT_MS, maxBuffer: 1 << 20 }),
-        ),
+        p.questions.map(async (q, i) => {
+          const file = join(tmpdir(), `pi-scout-${process.pid}-${Date.now()}-${i}.json`)
+          const r = await pi.exec("env", [`OTHALA_BUDGET_REPORT=${file}`, "pi", ...scoutArgs(small, q)], {
+            cwd: ctx.cwd, signal, timeout: SCOUT_TIMEOUT_MS, maxBuffer: 1 << 20,
+          })
+          const u = takeUsage(file)
+          if (u) pi.events.emit(USAGE_EVENT, { source: "scouts", ...u })
+          return r
+        }),
       )
       return { content: [{ type: "text" as const, text: formatScouts(p.questions, results) }], details: {} }
     },

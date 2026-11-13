@@ -3,6 +3,7 @@
 import { execFile, spawn } from "node:child_process"
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs"
 import { delimiter, join } from "node:path"
+import { type Usage, readReport } from "../budget/limits.ts"
 import type { IO, Output } from "./runner.ts"
 import { type Request, type RunTask, childArgs, childEnv, safeId, tail } from "./run.ts"
 import type { Tiers } from "./tiers.ts"
@@ -59,9 +60,20 @@ function sh(cwd: string, command: string, args: string[], env: NodeJS.ProcessEnv
 
 export const worktreeDir = (cwd: string, t: RunTask) => join(cwd, WORKTREES_DIR, safeId(t.id))
 const requestFile = (cwd: string, t: RunTask) => join(cwd, WORKTREES_DIR, `${safeId(t.id)}.request.json`)
+const usageFile = (cwd: string, t: RunTask) => join(cwd, WORKTREES_DIR, `${safeId(t.id)}.usage.json`)
+
+// What the child's budget extension wrote, taken once.
+export function takeUsage(file: string): Usage | undefined {
+  let text: string | undefined
+  try {
+    text = readFileSync(file, "utf8")
+    rmSync(file, { force: true })
+  } catch {}
+  return readReport(text)
+}
 const branch = (t: RunTask) => `pi-task-${safeId(t.id)}`
 
-export function gitIO(cwd: string, tiers: Tiers, save: IO["save"], log: IO["log"]): IO {
+export function gitIO(cwd: string, tiers: Tiers, save: IO["save"], log: IO["log"], usage: (u: Usage) => void): IO {
   const bases = new Map<string, string>()
   const sccache = onPath("sccache")
   const tree = (t: RunTask) => treeOf(cwd, safeId(t.id))
@@ -88,7 +100,13 @@ export function gitIO(cwd: string, tiers: Tiers, save: IO["save"], log: IO["log"
       // -B: a branch left by a worktree the user discarded is reused
       await git(cwd, "worktree", "add", dir, "-B", branch(t), base(t))
     },
-    child: (t, tier, prompt) => sh(worktreeDir(cwd, t), "pi", childArgs(tiers[tier], prompt), env(t), tree(t)),
+    async child(t, tier, prompt) {
+      const file = usageFile(cwd, t)
+      const out = await sh(worktreeDir(cwd, t), "pi", childArgs(tiers[tier], prompt), { ...env(t), OTHALA_BUDGET_REPORT: file }, tree(t))
+      const u = takeUsage(file)
+      if (u) usage(u)
+      return out
+    },
     async request(t) {
       const file = requestFile(cwd, t)
       if (!existsSync(file)) return undefined

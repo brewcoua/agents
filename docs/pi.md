@@ -15,6 +15,7 @@ modules/tools/pi/
 │       ├── tasks.json                # the model tiers of the tasks extension
 │       ├── extensions/guardrails/    # allow, ask and deny rules; rules.json holds them
 │       ├── extensions/{lsp,memory,btw,simplify,models-discovery,budget,tasks}/
+│       ├── extensions/lib/view.ts    # the dashboards' list screen; not an extension
 │       └── AGENTS.md -> ../../../../agents-common/home/.config/agents/AGENTS.md
 ├── merge/.pi/agent/settings.json     # only the keys this repository owns
 └── emit/pi/                          # the theme, and its fallback
@@ -115,6 +116,10 @@ quotes, `&&`, `||`, `;`, `|`, `&`, redirections); a command it cannot parse is d
 construct, so what precedes it is still checked for deny. A redirection to a file outside `/tmp`
 and `/dev/null` asks.
 
+`/guardrails` lists what was refused or asked about in this Pi, newest first (up to 200), with the outcome:
+denied by a rule, refused for lack of a UI, or allowed or declined by you. Enter shows the full command and the
+reason. The list lives in memory only.
+
 Denied tools are removed from the active set at `session_start` and `before_agent_start`, and
 `tool_call` blocks them anyway, because codemode can call a tool that is not active. A tool result
 over `maxOutputChars` keeps its first and last half with a note of how much was cut.
@@ -155,6 +160,7 @@ Markdown memory that survives sessions, kept the way Claude Code keeps its own: 
 - Global memories are in `~/.pi/agent/memory/`, project memories in `<project>/.pi/memory/`. Commit the project directory or ignore it, as you prefer; the global ignore does not list it.
 - Each memory is `<name>.md` with frontmatter (`name`, `description`, `type`: user, feedback, project or reference) and a body. `MEMORY.md` in the same directory holds one line per memory.
 - Tools: `memory_save` (create, or replace the memory of the same name) and `memory_forget`.
+- `/memory` lists both directories' memories (scope, type, name, description). Enter shows a memory's file; `d`, pressed twice, deletes it and its index line.
 - Each request carries the two `MEMORY.md` indexes as a leading user message, never stored in the session. The model reads a memory file with `read` when its line matters.
 - Pi offers no hook to add a turn to a compaction. So when a run ends with the context at 80% or more, the extension asks the model once, in a hidden message, to save what is worth keeping. It makes no model call of its own, and does nothing on exit. A manual `/compact` gets no such reminder.
 
@@ -172,7 +178,11 @@ Lists the models of an OpenAI-compatible server at start-up and registers them w
 
 ### budget
 
-Caps spend per session. It adds up cost and tokens (`input + output`) from each assistant message's usage, which is the cost Pi shows in its footer. It warns once at 25, 50 and 75% of the nearer cap. At 100% it blocks every further tool call with a reason telling the model to report and stop. Set `PI_BUDGET_USD` (default 2) and `PI_BUDGET_TOKENS` (default 5000000); 0 disables a cap. A model with no catalog price, such as the Claude bridge on a subscription, records a cost of 0, so only the token cap applies to it. There is no cap on output tokens per request; use `maxTokens` in models.json. Totals reset when the session starts, resumes or forks.
+Caps spend per session. It adds up cost and tokens (`input + output`) from each assistant message's usage, which is the cost Pi shows in its footer. It warns once at 25, 50 and 75% of the nearer cap. At 100% it blocks every further tool call with a reason telling the model to report and stop. Set `PI_BUDGET_USD` (default 2) and `PI_BUDGET_TOKENS` (default 5000000); 0 disables a cap. A model with no catalog price, such as the Claude bridge on a subscription, records a cost of 0, so only the token cap applies to it. There is no cap on output tokens per request; use `maxTokens` in models.json. A resumed or forked session starts from what its history already spent.
+
+Usage of the sessions this one starts counts against the same caps: task children (`tasks`), scouts (`scouts`) and `/btw` (`btw`). A child `pi` gets `OTHALA_BUDGET_REPORT`, a file its own budget extension writes its usage to after each message; the parent reads it when the child exits. `/btw` adds up its side session's messages. Each figure is stored in the session as a `budget-usage` entry, so a resume counts it again. A child also has its own caps, so one task cannot spend more than a session may.
+
+The status line shows `budget 12% · 610k/5M tok`, with the dollar figure when something cost more than 0. `/budget` shows the caps, this session's own usage, each source above, and the total.
 
 ## Tasks
 
@@ -256,7 +266,9 @@ reason and stays a draft; an approved multi-task plan starts running at once.
 ### Running tasks
 
 `/tasks run [slug]` runs an approved plan, or resumes one; without a slug it takes the only open plan.
-`/tasks status [slug]` prints each task's status, and `/tasks stop` stops a run. They want the TUI or RPC: Pi
+`/tasks status [slug]` prints each task's status, and `/tasks stop` stops a run. `/tasks [slug]` opens a view of
+the task file, read again each second: each task's status and failed attempts; Enter shows its files, verify
+command, granted files and notes; `s`, pressed twice, stops the run when this Pi is running it. They want the TUI or RPC: Pi
 does not run extension commands in print mode. A run goes on in the background, with its progress in the status
 line, so the session stays usable meanwhile. One run at a time per project: `.pi/worktrees/run.lock` holds the
 pid of the Pi running it. The plan file gains an optional `## Finish` section, one line holding the command that runs the

@@ -3,11 +3,29 @@ export interface Limits {
   tokens: number
 }
 
+export type Usage = { cost: number; tokens: number }
+
+// Emitted on pi.events by the tasks and btw extensions with { source, cost, tokens }: usage of
+// other sessions this one started.
+export const USAGE_EVENT = "othala:usage"
+
+// What a child pi wrote to its OTHALA_BUDGET_REPORT file; nothing when it wrote nothing.
+export function readReport(text: string | undefined): Usage | undefined {
+  try {
+    const u = JSON.parse(text ?? "")
+    return typeof u?.cost === "number" && typeof u?.tokens === "number" ? { cost: u.cost, tokens: u.tokens } : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export interface Totals {
-  cost: number
+  cost: number // this session's own messages, plus `others`
   tokens: number
   // Latest figure per message: a message can be reported more than once.
-  seen: Map<string, { cost: number; tokens: number }>
+  seen: Map<string, Usage>
+  // What this session started in other sessions: task children, scouts, /btw. By source.
+  others: Map<string, Usage>
   warnedAt: number
   stopped: boolean
 }
@@ -22,17 +40,33 @@ export function num(raw: string | undefined, fallback: number): number {
 }
 
 export function fresh(): Totals {
-  return { cost: 0, tokens: 0, seen: new Map(), warnedAt: 0, stopped: false }
+  return { cost: 0, tokens: 0, seen: new Map(), others: new Map(), warnedAt: 0, stopped: false }
+}
+
+function sum(t: Totals) {
+  t.cost = 0
+  t.tokens = 0
+  for (const e of [...t.seen.values(), ...t.others.values()]) {
+    t.cost += e.cost
+    t.tokens += e.tokens
+  }
 }
 
 export function record(t: Totals, id: string, cost: number, tokens: number) {
   t.seen.set(id, { cost, tokens })
-  t.cost = 0
-  t.tokens = 0
-  for (const e of t.seen.values()) {
-    t.cost += e.cost
-    t.tokens += e.tokens
-  }
+  sum(t)
+}
+
+export function addOther(t: Totals, source: string, u: Usage) {
+  const was = t.others.get(source) ?? { cost: 0, tokens: 0 }
+  t.others.set(source, { cost: was.cost + u.cost, tokens: was.tokens + u.tokens })
+  sum(t)
+}
+
+export const own = (t: Totals): Usage => {
+  const o = { cost: 0, tokens: 0 }
+  for (const e of t.seen.values()) (o.cost += e.cost), (o.tokens += e.tokens)
+  return o
 }
 
 // Share of the nearest enabled cap that is used up; 0 when every cap is disabled.
@@ -54,8 +88,17 @@ export function check(t: Totals, l: Limits): { kind: "stop" | "warn"; level: num
   return { kind: "warn", level }
 }
 
-const usd = (n: number) => `$${n.toFixed(2)}`
-const count = (n: number) => n.toLocaleString("en-US")
+export const usd = (n: number) => `$${n.toFixed(2)}`
+export const count = (n: number) => n.toLocaleString("en-US")
+const short = (n: number) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
+
+// The status line: the share of the nearest cap, then what is counted against each.
+export function status(t: Totals, l: Limits): string {
+  const parts = [`budget ${Math.floor(fraction(t, l) * 100)}%`]
+  if (l.tokens > 0) parts.push(`${short(t.tokens)}/${short(l.tokens)} tok`)
+  if (l.usd > 0 && t.cost > 0) parts.push(`${usd(t.cost)}/${usd(l.usd)}`)
+  return parts.join(" · ")
+}
 
 export function summary(t: Totals, l: Limits): string {
   const parts = []
