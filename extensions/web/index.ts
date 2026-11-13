@@ -13,6 +13,8 @@ const SEARCH_TIMEOUT = 120_000
 const FETCH_TIMEOUT = 30_000
 const RENDER_TIMEOUT = 60_000
 const MAX_CHARS = 20_000
+// A response body larger than this is refused, text or file: it would fill /tmp or the context.
+const MAX_BYTES = 50 * 1024 * 1024
 const UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
 // Headless chromium without the requests it makes on its own (updates, sync, metrics).
@@ -48,6 +50,19 @@ function windowed(text: string, offset: number, head: string): string {
   return `${head}\n\n${w.text}${more}`
 }
 
+async function body(res: Response): Promise<Buffer> {
+  const too = () => new Error(`${res.url} is larger than ${MAX_BYTES / 1024 / 1024} MB`)
+  if (Number(res.headers.get("content-length")) > MAX_BYTES) throw too()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for await (const chunk of res.body ?? []) {
+    size += chunk.length
+    if (size > MAX_BYTES) throw too()
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks)
+}
+
 function which(cmd: string): string | undefined {
   for (const dir of (process.env.PATH ?? "").split(":")) {
     try {
@@ -67,6 +82,13 @@ function run(cmd: string, args: string[], signal: AbortSignal): Promise<string> 
 }
 
 export default function (pi: ExtensionAPI) {
+  // Files web_fetch saves live as long as the session, so the model can read them meanwhile.
+  let downloads: string | undefined
+  pi.on("session_shutdown", () => {
+    if (downloads) rmSync(downloads, { recursive: true, force: true })
+    downloads = undefined
+  })
+
   pi.registerTool({
     name: "web_search",
     label: "Web search",
@@ -120,19 +142,22 @@ export default function (pi: ExtensionAPI) {
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${res.url}`)
       const type = res.headers.get("content-type") ?? ""
       const head = `${res.url}\n${type}`
+      const data = await body(res)
       if (/^text\/html|xhtml/i.test(type) && !p.raw) {
-        const html = await res.text()
+        const html = data.toString("utf8")
         return ok(windowed(toText(html, res.url), p.offset ?? 0, `${title(html)}\n${head}`))
       }
-      if (/^text\/|json|xml|javascript|yaml/i.test(type)) return ok(windowed(await res.text(), p.offset ?? 0, head))
+      if (/^text\/|json|xml|javascript|yaml/i.test(type)) return ok(windowed(data.toString("utf8"), p.offset ?? 0, head))
+      downloads ??= mkdtempSync(join(tmpdir(), "pi-web-"))
       const name = decodeURIComponent(new URL(res.url).pathname.split("/").pop() || "download")
-      const file = join(mkdtempSync(join(tmpdir(), "pi-web-")), name.replace(/[^\w.-]/g, "_"))
-      writeFileSync(file, Buffer.from(await res.arrayBuffer()))
+      const file = join(mkdtempSync(join(downloads, "f-")), name.replace(/[^\w.-]/g, "_"))
+      writeFileSync(file, data)
       return ok(`${head}\nNot text; saved to ${file}`)
     },
   })
 
-  const chromium = which("chromium")
+  // Fedora's package installs chromium-browser.
+  const chromium = which("chromium") ?? which("chromium-browser")
   if (!chromium) return
 
   pi.registerTool({
