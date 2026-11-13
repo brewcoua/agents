@@ -75,8 +75,12 @@ export interface Result {
   publishedDate?: string | null
 }
 
-export function formatResults(results: Result[], max: number): string {
-  if (!results.length) return "No results."
+export function formatResults(all: Result[], max: number): string {
+  // An engine whose markup changed can return links with no host, which web_fetch cannot open.
+  const results = all.filter((r) => /^https?:\/\/[^/]/.test(r.url))
+  const dropped = all.length - results.length
+  const note = dropped ? `\n\n${dropped} results without a usable URL left out.` : ""
+  if (!results.length) return "No results." + note
   return results
     .slice(0, max)
     .map((r, i) => {
@@ -84,5 +88,5 @@ export function formatResults(results: Result[], max: number): string {
       const snippet = r.content ? `\n   ${r.content.replace(/\s+/g, " ").trim()}` : ""
       return `${i + 1}. ${r.title}${date}\n   ${r.url}${snippet}`
     })
-    .join("\n")
+    .join("\n") + note
 }

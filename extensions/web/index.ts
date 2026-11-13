@@ -103,17 +103,28 @@ export default function (pi: ExtensionAPI) {
           description: "it searches code hosts, package registries and Q&A sites; default general",
         }),
       ),
+      engines: Type.Optional(
+        Type.String({
+          description:
+            "Comma-separated engine names to search instead of the category, including these, off by default: " +
+            "google, qwant, yahoo, yandex, mwmbl, wiby, gitlab, codeberg, sourcehut, discuss.python, microsoft learn, nixos wiki, " +
+            "lib.rs, packagist, pub.dev, hex, hoogle, huggingface, alpine linux packages, voidlinux, fdroid, " +
+            "free software directory, national vulnerability database, crossref, google scholar, google news, qwant news",
+        }),
+      ),
       max: Type.Optional(Type.Integer({ minimum: 1, maximum: 30, description: "Results to return, default 8" })),
     }),
     async execute(_id, p, signal) {
       const u = new URL("/search", SEARXNG)
-      u.search = new URLSearchParams({ q: p.query, format: "json", categories: p.category ?? "general" }).toString()
+      // SearXNG ignores engines when categories is also set.
+      const where = p.engines ? { engines: p.engines } : { categories: p.category ?? "general" }
+      u.search = new URLSearchParams({ q: p.query, format: "json", ...where }).toString()
       let res: Response
       try {
         res = await fetch(u, { signal: signalWith(signal, SEARCH_TIMEOUT) })
       } catch (e) {
         const refused = (e as { cause?: { code?: string } }).cause?.code === "ECONNREFUSED"
-        throw new Error(refused ? "SearXNG is not running. Run: othala module enable searxng && othala module start searxng" : `search failed: ${(e as Error).message}`)
+        throw new Error(refused ? "SearXNG is not running. Run: othala module add searxng, or othala module start searxng if it is added" : `search failed: ${(e as Error).message}`)
       }
       if (!res.ok) throw new Error(`SearXNG answered ${res.status} ${res.statusText}`)
       const data = (await res.json()) as { results: Result[]; unresponsive_engines?: [string, string][] }

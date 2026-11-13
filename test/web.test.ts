@@ -42,3 +42,8 @@ test("results list title, date, URL and snippet", () => {
   assert.equal(out, "1. A (2026-01-02)\n   https://a\n   one two")
   assert.equal(formatResults([], 5), "No results.")
 })
+
+test("results without an http(s) host are left out and counted", () => {
+  const out = formatResults([{ title: "A", url: "http:///go/v1/x" }, { title: "B", url: "https://b" }, { title: "C", url: "javascript:x" }], 5)
+  assert.equal(out, "1. B\n   https://b\n\n2 results without a usable URL left out.")
+})

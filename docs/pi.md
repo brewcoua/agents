@@ -190,7 +190,7 @@ Three tools; none clicks, types or logs in.
 
 | Tool | Does |
 |---|---|
-| `web_search` | Searches through the `searxng` module's local SearXNG ([`26-searxng.md`](26-searxng.md)) and returns title, URL, date and snippet for up to 30 results (default 8). `category` is `general`, `it`, `news` or `science`. It names the engines that did not answer. Without the module it says how to start it |
+| `web_search` | Searches through the `searxng` module's local SearXNG ([`26-searxng.md`](26-searxng.md)) and returns title, URL, date and snippet for up to 30 results (default 8). `category` is `general`, `it`, `news` or `science`; `engines` names engines to search instead, including those off by default ([`26-searxng.md`](26-searxng.md#engines)). It names the engines that did not answer, and leaves out results whose URL has no host. Without the module it says how to start it |
 | `web_fetch` | Fetches an `http(s)` URL. HTML comes back as Markdown-like text, the `<main>` or `<article>` only when the page has one; text, JSON and XML as they are; anything else (a PDF, an image) is saved under `/tmp/pi-web-*/` and its path returned, for the `documents` skill; that directory is deleted when the session ends. A body over 50 MB is refused. Text comes in windows of 20000 characters, and the result gives the `offset` to read on |
 | `web_render` | Loads the URL in headless chromium, runs its JavaScript for up to 10 seconds of page time, and returns the text the same way, or with `screenshot` a PNG of the viewport (default 1280 by 1600). Registered only when `chromium` (or Fedora's `chromium-browser`) is on PATH; the `searxng` module installs it |
 
