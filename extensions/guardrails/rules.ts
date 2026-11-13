@@ -227,10 +227,13 @@ export function toolVerdict(rules: Rules, tool: string): Verdict {
   return rules.tools[tool] ?? rules.tools["*"] ?? "allow"
 }
 
-export function checkPath(rules: Rules, cwd: string, home: string, path: string): Decision {
+// Inside the project directory a path is allowed. Outside, a read follows `external`, and an edit
+// always asks: /tmp is no scratch space for edits.
+export function checkPath(rules: Rules, cwd: string, home: string, path: string, edits = false): Decision {
   const abs = resolve(cwd, path.startsWith("~/") ? home + path.slice(1) : path)
   if (isSecret(rules, abs)) return { verdict: "deny", reason: `${path} holds secrets` }
   if (abs === cwd || abs.startsWith(`${cwd}/`)) return { verdict: "allow", reason: "" }
+  if (edits) return { verdict: "ask", reason: `${path} is outside the project directory` }
   const external = Object.fromEntries(
     Object.entries(rules.external).map(([k, v]) => [k.startsWith("~/") ? home + k.slice(1) : k, v]),
   )
@@ -291,10 +294,6 @@ export function checkCommit(command: string, readFile: (path: string) => string 
 
 const PATH_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"])
 
-export function isPlanFile(cwd: string, path: string): boolean {
-  return resolve(cwd, path).startsWith(`${cwd}/.pi/plans/`)
-}
-
 // What a task's child may run besides its verify command: `git add <paths>` where every path is
 // one of the task's files, and `git commit`. Nothing piped, redirected or substituted.
 export function taskGit(command: string, files: string[], cwd: string): boolean {
@@ -321,6 +320,7 @@ export type Env = {
   readFile: (path: string) => string | undefined
   taskFiles?: string[] // OTHALA_TASK_FILES: set in a task's child pi
   taskVerify?: string // OTHALA_TASK_VERIFY
+  realpath?: (path: string) => string // for edits; absent in tests, where paths are lexical
 }
 
 // The verdict for one tool call. In a task's child nobody can answer, so ask becomes deny.
@@ -337,11 +337,23 @@ export function decide(rules: Rules, env: Env, toolName: string, input: Record<s
   } else if (PATH_TOOLS.has(toolName)) {
     const path = String(input.path ?? input.file_path ?? ".")
     const edits = toolName === "edit" || toolName === "write"
-    const abs = resolve(cwd, path)
-    const inTask = abs.startsWith(`${cwd}/`) && env.taskFiles?.some((g) => glob(g, abs.slice(cwd.length + 1)))
-    if (edits && (isPlanFile(cwd, path) || inTask)) d = { verdict: "allow", reason: "" }
-    d = strictest(d, checkPath(rules, cwd, env.home, path))
-    if (env.taskFiles && edits && !inTask) d = { verdict: "deny", reason: `${path} is outside the files of this task` }
+    // An edit follows symlinks: a link in the project to /etc is no way out of it.
+    const real = edits && env.realpath ? env.realpath : (p: string) => p
+    const root = real(cwd)
+    const abs = real(resolve(cwd, path.startsWith("~/") ? env.home + path.slice(1) : path))
+    const inside = abs.startsWith(`${root}/`)
+    const inTask = inside && env.taskFiles?.some((g) => glob(g, abs.slice(root.length + 1)))
+    d = strictest(d, checkPath(rules, root, env.home, abs, edits))
+    // hooks and config there run code on the next git command
+    if (edits && abs.startsWith(`${root}/.git/`)) d = strictest(d, { verdict: "ask", reason: `${path} is inside .git` })
+    if (env.taskFiles && edits && !inTask && d.verdict !== "deny") {
+      d = {
+        verdict: "deny",
+        reason: inside
+          ? `${path} is outside the files of this task; if the task cannot be done without it, call request_files`
+          : `${path} is outside the project`,
+      }
+    }
   }
   if (env.taskFiles && d.verdict === "ask") d = { verdict: "deny", reason: `${d.reason}, and a task cannot ask` }
   return d

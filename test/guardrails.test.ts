@@ -8,7 +8,6 @@ import {
   checkPath,
   decide,
   type Env,
-  isPlanFile,
   parse,
   taskGit,
   toolVerdict,
@@ -120,11 +119,18 @@ test("paths", () => {
   assert.equal(p("/tmp/.env"), "deny")
   assert.equal(p("deploy/.env.example"), "allow")
   assert.equal(p("a/id_ed25519"), "deny")
+  const e = (path: string) => checkPath(rules, "/work", "/home/u", path, true).verdict
+  assert.equal(e("src/a.ts"), "allow")
+  assert.equal(e("/tmp/x"), "ask")
+  assert.equal(e("/var/tmp/x"), "ask")
+  assert.equal(e("~/notes.md"), "ask")
+  assert.equal(e("../other/a.ts"), "ask")
+  assert.equal(e(".env"), "deny")
 })
 
 test("tool verdicts", () => {
   assert.equal(toolVerdict(rules, "read"), "allow")
-  assert.equal(toolVerdict(rules, "edit"), "ask")
+  assert.equal(toolVerdict(rules, "edit"), "allow")
   assert.equal(toolVerdict(rules, "mcp_thing"), "allow")
 })
 
@@ -180,13 +186,18 @@ const env: Env = { home: "/home/u", readFile: read }
 const task = { ...env, taskFiles: ["src/pkg.rs", "tests/*.rs"], taskVerify: "cargo test pkg::" }
 const call = (e: Env, tool: string, input: Record<string, unknown>) => decide(rules, e, tool, input, "/work").verdict
 
-test("plan files under .pi/plans are written without asking, everywhere", () => {
+test("edit and write: inside the project without asking, outside asks", () => {
   assert.equal(call(env, "write", { path: ".pi/plans/a.md" }), "allow")
-  assert.equal(call(env, "edit", { path: "/work/.pi/plans/a.json" }), "allow")
-  assert.equal(call(env, "write", { path: ".pi/plans/../x.md" }), "ask")
-  assert.equal(call(env, "write", { path: ".pi/plans-x/a.md" }), "ask")
-  assert.equal(call(env, "write", { path: "src/a.ts" }), "ask")
-  assert.equal(isPlanFile("/work", ".pi/plans"), false)
+  assert.equal(call(env, "edit", { path: "/work/src/a.ts" }), "allow")
+  assert.equal(call(env, "write", { path: "src/../../x.md" }), "ask")
+  assert.equal(call(env, "write", { path: "/tmp/x.md" }), "ask")
+  assert.equal(call(env, "read", { path: "/tmp/x.md" }), "allow")
+  assert.equal(call(env, "edit", { path: "src/.env" }), "deny")
+  assert.equal(call(env, "write", { path: ".git/hooks/pre-commit" }), "ask")
+  // a symlink in the project that leads out of it
+  const links = { ...env, realpath: (p: string) => p.replace("/work/etc-link", "/etc") }
+  assert.equal(call(links, "write", { path: "etc-link/hosts" }), "ask")
+  assert.equal(call(links, "read", { path: "etc-link/hosts" }), "allow")
 })
 
 test("task child: verify command, git add of its files, git commit", () => {
@@ -224,6 +235,9 @@ test("task child: edit and write inside files, nothing asks", () => {
   assert.equal(call(task, "write", { path: "src/pkg.rs" }), "allow")
   assert.equal(call(task, "edit", { path: "/work/tests/a.rs" }), "allow")
   assert.equal(call(task, "write", { path: "src/other.rs" }), "deny")
+  assert.match(decide(rules, task, "write", { path: "src/other.rs" }, "/work").reason, /request_files/)
+  assert.equal(call(task, "write", { path: "/tmp/x" }), "deny")
+  assert.doesNotMatch(decide(rules, task, "write", { path: "/tmp/x" }, "/work").reason, /request_files/)
   assert.equal(call(task, "write", { path: "/work2/src/pkg.rs" }), "deny")
   assert.equal(call(task, "write", { path: ".pi/plans/a.md" }), "deny")
   assert.equal(call(task, "read", { path: "/etc/hosts" }), "deny") // ask becomes deny

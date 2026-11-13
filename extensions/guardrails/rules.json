@@ -1,8 +1,6 @@
 {
   "tools": {
-    "*": "allow",
-    "edit": "ask",
-    "write": "ask"
+    "*": "allow"
   },
   "bash": {
     "*": "ask",

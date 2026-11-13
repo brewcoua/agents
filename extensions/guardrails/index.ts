@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import rules from "./rules.json"
@@ -19,7 +19,23 @@ function readFile(path: string): string | undefined {
   }
 }
 
-const env: Env = { home: homedir(), readFile, taskFiles: TASK_FILES, taskVerify: process.env.OTHALA_TASK_VERIFY }
+// A file that does not exist yet resolves through its nearest existing directory.
+function realpath(path: string): string {
+  let dir = path
+  let rest = ""
+  for (;;) {
+    try {
+      return realpathSync(dir) + rest
+    } catch {
+      const i = dir.lastIndexOf("/")
+      if (i <= 0) return path
+      rest = dir.slice(i) + rest
+      dir = dir.slice(0, i)
+    }
+  }
+}
+
+const env: Env = { home: homedir(), readFile, realpath, taskFiles: TASK_FILES, taskVerify: process.env.OTHALA_TASK_VERIFY }
 
 async function enforce(toolName: string, input: Record<string, unknown>, ctx: ExtensionContext) {
   const d = decide(R, env, toolName, input, ctx.cwd)
