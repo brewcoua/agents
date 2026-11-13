@@ -117,7 +117,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, p, signal) {
       const u = new URL("/search", SEARXNG)
       // SearXNG ignores engines when categories is also set.
-      const where = p.engines ? { engines: p.engines } : { categories: p.category ?? "general" }
+      const where: Record<string, string> = p.engines ? { engines: p.engines } : { categories: p.category ?? "general" }
       u.search = new URLSearchParams({ q: p.query, format: "json", ...where }).toString()
       let res: Response
       try {
