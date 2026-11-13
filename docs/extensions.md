@@ -94,6 +94,25 @@ Usage of the sessions this one starts counts against the same caps: task childre
 
 The status line shows `budget 12% · 610k/5M tok`, with the dollar figure when something cost more than 0. `/budget` shows the caps, this session's own usage, each source above, and the total.
 
+### usage
+
+Shows how much of each subscription is left, and what was spent. It sends no request of its own: it
+reads the rate-limit figures providers put on their responses, and writes them, per provider, to
+`~/.pi/agent/othala-usage.json`, which every Pi on the machine shares, task children included.
+
+| Provider | Where the figures come from |
+|---|---|
+| Claude (bridge) | the `anthropic-ratelimit-unified-*` headers the bridge rebuilds from Claude Code's rate-limit events: the 5-hour and 7-day windows, used as a fraction, reset in Unix seconds |
+| Codex | the `x-codex-primary-*` and `x-codex-secondary-*` headers, or the `codex.rate_limits` stream event: used percent, window in minutes, reset in Unix seconds. Read from the Codex CLI's parser, not yet seen from Pi |
+| others | any header whose name has `ratelimit`, `rate-limit` or `quota`, kept as it came, so the format shows in `/usage` before anything parses it |
+
+The status line shows the current model's provider, `claude-bridge 5h 0% · 7d 8%`. `/usage` lists
+each provider's last report, dimmed after a day, with the reset times on `Enter`; then the tokens
+and cost of the last 24 hours, 7 days and 30 days, by model, read from the session files under
+`~/.pi/agent/sessions`, and by source for the task children, scouts and `/btw` the budget recorded,
+which keep no session of their own. A message's cost is the one recorded when it ran, 0 for the
+bridge. The list refreshes every 5 seconds and sits over the editor; a run carries on underneath.
+
 ### web
 
 Three tools; none clicks, types or logs in.
