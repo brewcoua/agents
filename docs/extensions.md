@@ -86,6 +86,19 @@ Lists the models of an OpenAI-compatible server at start-up and registers them w
 
 A discovered model gets an output cap of 64K tokens, since ollama reports none and Pi's default of 16K is too low for coding. A cloud model (`<name>:cloud`, or `<name>-cloud` as in `gpt-oss:120b-cloud`) gets its per-million price from `extensions/models-discovery/prices.json`, by name, so the budget's dollar cap counts ollama cloud; a local model costs 0. Off-peak prices are left out: the extension does not know the clock they follow.
 
+### advisor
+
+The `advisor` tool takes no parameters. It sends the session's context, compactions included, to
+the active profile's `top` model ([Profiles](#profiles)) and returns its advice: a plan, a
+correction, or a signal to stop and ask the user. The advisor gets no tools: the tool declarations
+are removed from the context, as is the `advisor` call that is running, and a user turn is added
+when the context ends on the model's. It follows `rpiv-advisor`'s handoff, without its model picker.
+
+The call goes through Pi's model registry, which applies each provider's credentials, OAuth
+included. Its cost counts against the session's budget under `advisor`. While the session itself
+runs on the `top` model, the tool is not offered. An unknown `top` model, missing credentials or a
+failed call come back as the tool's text.
+
 ### ask
 
 The `ask_user_question` tool: the model asks up to 4 questions, each with 2 to 4 options, and gets
@@ -151,7 +164,7 @@ Guardrails allows all three, as it allows `curl`.
 
 | Role | Used by |
 |---|---|
-| `top` | the session after a switch, `/plan` |
+| `top` | the session after a switch, `/plan`, the `advisor` tool |
 | `large` | `large` tasks, and the third attempt of a failing task |
 | `small` | scouts, `small` tasks |
 
@@ -212,35 +225,6 @@ status: draft
 ## Goal
 ## Decisions
 ## Open questions
-
-## Profiles
-
-`profiles.json` maps each provider profile to three models, one per role, as `provider/model`:
-
-| Role | Used by |
-|---|---|
-| `top` | the session after a switch, `/plan` |
-| `large` | `large` tasks, and the third attempt of a failing task |
-| `small` | scouts, `small` tasks |
-
-| Profile | `top` | `large` | `small` |
-|---|---|---|---|
-| `claude` | `claude-bridge/claude-opus-5-5` | `claude-bridge/claude-sonnet-5-5` | `claude-bridge/claude-haiku-5-5` |
-| `codex` | `openai-codex/gpt-6.1-sol` | `openai-codex/gpt-6.1-terra` | `openai-codex/gpt-6-luna` |
-| `copilot` | `github-copilot/gpt-6-luna` | `github-copilot/gpt-5.6-luna` | `github-copilot/mai-code-1.1-flash` |
-| `ollama` | `ollama/kimi-k3.1-pro:cloud` | `ollama/glm-5.3:cloud` | `ollama/glm-5.3-flash:cloud` |
-
-`/provider <name>` switches the session to the profile's `top` model and stores the profile and the
-model of each role in `~/.pi/agent/othala-profile.json`, which tasks and scouts read. A role whose
-model Pi does not know keeps the model it had, and the command says so; for ollama it gives the
-`ollama pull` line. A profile whose `top` model has no credentials is refused. `/provider` alone
-shows the active profile, each role's model, and whether Pi has credentials for it. With no state
-file, the first profile of `order` is active.
-
-When a run ends on an error that reads as an exhausted quota or a rate limit, the extension offers
-the next profile of `order` (`claude`, `codex`, `copilot`, `ollama`) and switches only on a yes. The
-match (`429`, "rate limit", "usage limit", "quota", "too many requests") is not checked against each
-provider's real errors yet.
 
 ## Tasks
 ### 3.1 dnf backend
