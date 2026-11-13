@@ -46,7 +46,7 @@ export const killRun = (cwd: string) => kill((tree) => tree.startsWith(`${cwd}#`
 // SIGKILL. What it started is left to killRun, which the next session start runs.
 const setpriv = onPath("setpriv")
 
-function sh(cwd: string, command: string, args: string[], env: NodeJS.ProcessEnv, tree: string): Promise<Output> {
+export function sh(cwd: string, command: string, args: string[], env: NodeJS.ProcessEnv, tree: string): Promise<Output> {
   return new Promise((done) => {
     let output = ""
     const argv = setpriv ? ["--pdeathsig", "KILL", "--", command, ...args] : args

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { basename, join } from "node:path"
 import { Type } from "typebox"
-import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent"
 import rules from "../guardrails/rules.json"
 import type { Rules } from "../guardrails/rules.ts"
 import { edit } from "../lib/editor.ts"
@@ -9,10 +9,10 @@ import { showList } from "../lib/view.ts"
 import { live } from "../agents/fleet.ts"
 import type { Spawner } from "../agents/runtime.ts"
 import { showFinding } from "./findings.ts"
-import { WORKTREES_DIR, git, gitIO, killRun } from "./git.ts"
+import { WORKTREES_DIR, git, gitIO, killRun, sh, treeOf } from "./git.ts"
 import {
-  PLANS_DIR, commentsMessage, implementMessage, isSmall, parseComments, parsePlan,
-  planPrompt, planStatus, planVerdict, slug, uniqueSlug, withStatus,
+  type Mode, PLANS_DIR, acceptanceReport, buildArgs, commentsMessage, implementMessage, isSmall, modePrompt, parseComments, parsePlan,
+  planPrompt, planStatus, planVerdict, researchPath, slug, uniqueSlug, withStatus,
 } from "./plan.ts"
 import { type RunPlan, type RunTask, compile, findingTask, start, summary } from "./run.ts"
 import { runPlan } from "./runner.ts"
@@ -22,8 +22,9 @@ import { type Model, loadActive, loadProfiles } from "../lib/profiles.ts"
 const R = rules as Rules
 
 // Plan mode, kept in the session so a resume is still planning: the plan file
-// (relative to the project) and the model to go back to.
-type State = { path: string; before?: Model }
+// (relative to the project), the /build or /research stages, and the model to go back to.
+type State = Mode & { before?: Model }
+const PLAN_TOOLS = ["scout", "acceptance_check"]
 const ENTRY = "tasks-plan"
 
 // The active profile's roles (/provider), and how many tasks run at once.
@@ -72,7 +73,7 @@ export default function (pi: ExtensionAPI) {
     const last = ctx.sessionManager.getEntries().filter((e: any) => e.type === "custom" && e.customType === ENTRY).pop() as any
     state = last?.data ?? undefined
     ctx.ui.setStatus("plan", state ? "plan mode" : undefined)
-    if (state) pi.setActiveTools([...new Set([...pi.getActiveTools(), "scout"])])
+    if (state) pi.setActiveTools([...new Set([...pi.getActiveTools(), ...PLAN_TOOLS])])
     // A Pi killed during a run leaves the processes its children started; nobody else will stop them.
     if (existsSync(join(ctx.cwd, WORKTREES_DIR)) && !holder(ctx.cwd, token)) {
       const n = killRun(ctx.cwd)
@@ -90,7 +91,8 @@ export default function (pi: ExtensionAPI) {
   // bridge drops a systemPrompt from before_agent_start.
   pi.on("context", (event) => {
     if (!state) return undefined
-    const note = { role: "user" as const, content: [{ type: "text" as const, text: planPrompt(state.path) }], timestamp: 0 }
+    const text = state.mode === "research" ? modePrompt(state) : [planPrompt(state.path), modePrompt(state)].filter(Boolean).join("\n\n")
+    const note = { role: "user" as const, content: [{ type: "text" as const, text }], timestamp: 0 }
     return { messages: [note, ...event.messages] }
   })
 
@@ -100,7 +102,16 @@ export default function (pi: ExtensionAPI) {
     return d.verdict === "allow" ? undefined : { block: true, reason: d.reason }
   })
 
-  async function enter(request: string, ctx: ExtensionCommandContext) {
+  // /research ends when its file is written.
+  pi.on("agent_end", async (_e, ctx) => {
+    if (state?.mode !== "research" || !existsSync(join(ctx.cwd, researchPath(state.path)))) return
+    const name = basename(state.path, ".md")
+    await leave(ctx)
+    ctx.ui.notify(`Research written to ${researchPath(`${PLANS_DIR}/${name}.md`)}. /build --from ${name} builds from it.`, "info")
+  })
+
+  // `name`: a plan's slug, for /build --from; otherwise one is made from the request.
+  async function enter(request: string, ctx: ExtensionCommandContext, mode: Omit<Mode, "path"> = {}, name?: string) {
     if (state) return pi.sendUserMessage(request)
     let tiers
     try {
@@ -116,18 +127,18 @@ export default function (pi: ExtensionAPI) {
 
     const dir = join(ctx.cwd, PLANS_DIR)
     mkdirSync(dir, { recursive: true })
-    const name = uniqueSlug(slug(request), (s) => existsSync(join(dir, `${s}.md`)))
-    save({ path: `${PLANS_DIR}/${name}.md`, before })
-    ctx.ui.setStatus("plan", "plan mode")
-    pi.setActiveTools([...new Set([...pi.getActiveTools(), "scout"])])
+    const taken = (s: string) => existsSync(join(dir, `${s}.md`)) || existsSync(join(dir, `${s}.research.md`))
+    save({ path: `${PLANS_DIR}/${name ?? uniqueSlug(slug(request), taken)}.md`, ...mode, before })
+    ctx.ui.setStatus("plan", mode.mode ? `${mode.mode} mode` : "plan mode")
+    pi.setActiveTools([...new Set([...pi.getActiveTools(), ...PLAN_TOOLS])])
     pi.sendUserMessage(request)
   }
 
-  async function leave(ctx: ExtensionCommandContext) {
+  async function leave(ctx: ExtensionContext) {
     const before = state?.before
     save(undefined)
     ctx.ui.setStatus("plan", undefined)
-    pi.setActiveTools(pi.getActiveTools().filter((n) => n !== "scout"))
+    pi.setActiveTools(pi.getActiveTools().filter((n) => !PLAN_TOOLS.includes(n)))
     const model = before && ctx.modelRegistry.find(before.provider, before.id)
     if (model) await pi.setModel(model)
   }
@@ -268,6 +279,7 @@ export default function (pi: ExtensionAPI) {
 
   async function approve(ctx: ExtensionCommandContext) {
     if (!state) return ctx.ui.notify("Not planning. Start with /plan <request>.", "warning")
+    if (state.mode === "research") return ctx.ui.notify("This is research, not a plan: it ends when its file is written. /plan cancel leaves.", "warning")
     const file = join(ctx.cwd, state.path)
     if (!existsSync(file)) return ctx.ui.notify(`${state.path} does not exist yet; the model has not written the plan.`, "warning")
     const text = readFileSync(file, "utf8")
@@ -348,6 +360,42 @@ export default function (pi: ExtensionAPI) {
       if (a === "cancel") return state ? leave(ctx) : ctx.ui.notify("Not planning.", "info")
       if (!a) return ctx.ui.notify(state ? `Planning in ${state.path}. /plan review, /plan approve, /plan cancel.` : "usage: /plan <request>", "info")
       await enter(a, ctx)
+    },
+  })
+
+  pi.registerCommand("build", {
+    description: "A request to commits, through intake, research, approaches, acceptance and a plan: /build [--research | --no-research] <request>, /build --from <slug>",
+    handler: async (args, ctx) => {
+      const a = buildArgs(args)
+      if ("error" in a) return ctx.ui.notify(a.error, "error")
+      if (!a.from) return enter(a.request as string, ctx, { mode: "build", research: a.research })
+      const research = researchPath(`${PLANS_DIR}/${a.from}.md`)
+      if (!existsSync(join(ctx.cwd, research))) return ctx.ui.notify(`No ${research}. /research <question> writes one.`, "error")
+      if (existsSync(join(ctx.cwd, PLANS_DIR, `${a.from}.md`))) return ctx.ui.notify(`${PLANS_DIR}/${a.from}.md exists already.`, "error")
+      await enter(`Build from the research in ${research}.`, ctx, { mode: "build", from: true }, a.from)
+    },
+  })
+
+  pi.registerCommand("research", {
+    description: "Research a question with agents in parallel, into .pi/plans/<slug>.research.md: /research <question>",
+    handler: async (args, ctx) => (args.trim() ? enter(args.trim(), ctx, { mode: "research" }) : ctx.ui.notify("usage: /research <question>", "info")),
+  })
+
+  pi.registerTool({
+    name: "acceptance_check",
+    label: "Acceptance check",
+    description: "Runs each acceptance command of the plan being written in the project, and says which pass already. Every one must fail before the change.",
+    promptSnippet: "Check that the plan's acceptance commands fail on the current tree",
+    defaultActive: false,
+    parameters: Type.Object({}),
+    async execute(_id, _p, _signal, _update, ctx) {
+      const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} })
+      if (!state) return text("Not planning.")
+      const file = join(ctx.cwd, state.path)
+      const items = existsSync(file) ? parsePlan(readFileSync(file, "utf8")).acceptance : []
+      const results: Record<string, { code: number | null; output: string }> = {}
+      for (const a of items.filter((a) => a.kind === "command")) results[a.id] = await sh(ctx.cwd, "sh", ["-c", a.text], process.env, treeOf(ctx.cwd, "!acceptance"))
+      return text(acceptanceReport(items, results))
     },
   })
 

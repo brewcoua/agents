@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs"
 import { test } from "node:test"
 import type { Rules } from "../extensions/guardrails/rules.ts"
 import {
-  PLAN_FORMAT, commentsMessage, isSmall, parseComments, parsePlan, planStatus, planVerdict, slug, uniqueSlug, withStatus,
+  PLAN_FORMAT, acceptanceReport, buildArgs, commentsMessage, isSmall, modePrompt, parseComments, parsePlan, planStatus, planVerdict,
+  slug, uniqueSlug, withStatus,
 } from "../extensions/tasks/plan.ts"
 import { SCOUT, clip, formatScouts } from "../extensions/tasks/scout.ts"
 
@@ -163,6 +164,49 @@ test("plan mode: tools", () => {
   const v = (tool: string) => planVerdict(rules, tool, {}, "/work").verdict
   for (const t of ["read", "grep", "find", "ls", "scout", "ask_user_question"]) assert.equal(v(t), "allow", t)
   for (const t of ["memory_save", "mcp__x__y", "codemode"]) assert.equal(v(t), "deny", t)
+})
+
+test("plan mode: only read-only agent types, never resumed or in a worktree", () => {
+  const v = (input: Record<string, unknown>) => planVerdict(rules, "agent", input, "/work")
+  for (const type of ["scout", "research", "locate", "precedent"]) assert.equal(v({ type }).verdict, "allow", type)
+  assert.match(v({ type: "implement" }).reason, /plan mode: only scout, research, locate, precedent agents/)
+  assert.equal(v({ type: "scout", resume: "x" }).verdict, "deny")
+  assert.equal(v({ type: "scout", isolation: "worktree" }).verdict, "deny")
+  for (const t of ["agent_result", "acceptance_check"]) assert.equal(planVerdict(rules, t, {}, "/work").verdict, "allow", t)
+})
+
+test("buildArgs: flags, --from, and the request", () => {
+  assert.deepEqual(buildArgs("add a --json flag"), { request: "add a --json flag" })
+  assert.deepEqual(buildArgs("--research  add x"), { request: "add x", research: true })
+  assert.deepEqual(buildArgs("--no-research add x"), { request: "add x", research: false })
+  assert.deepEqual(buildArgs("--from json-flag"), { from: "json-flag" })
+  assert.ok("error" in buildArgs(""))
+  assert.ok("error" in buildArgs("--from"))
+  assert.ok("error" in buildArgs("--from a b"))
+  assert.ok("error" in buildArgs("--research --no-research x"))
+})
+
+test("modePrompt: the build's stages, research as decided, and research alone", () => {
+  const p = (s: Parameters<typeof modePrompt>[0]) => modePrompt(s)
+  const build = p({ path: ".pi/plans/x.md", mode: "build" })
+  for (const s of ["1. Intake", "no recommended option", "2. Research", "Decide whether research runs", ".pi/plans/x.research.md", "3. Approaches", "4. Acceptance", "acceptance_check", "5. Plan", "/plan review"]) assert.ok(build.includes(s), s)
+  assert.match(p({ path: ".pi/plans/x.md", mode: "build", research: true }), /Research runs: the user asked for it/)
+  assert.match(p({ path: ".pi/plans/x.md", mode: "build", research: false }), /Skip research: the user said so/)
+  const from = p({ path: ".pi/plans/x.md", mode: "build", from: true })
+  assert.ok(!from.includes("1. Intake") && from.includes("Read .pi/plans/x.research.md") && from.includes("3. Approaches"))
+  const research = p({ path: ".pi/plans/x.md", mode: "research" })
+  assert.ok(research.includes("Write .pi/plans/x.research.md") && research.includes("/build --from x") && !research.includes("Acceptance"))
+  assert.equal(p({ path: ".pi/plans/x.md" }), "")
+})
+
+test("acceptanceReport: every command must fail now", () => {
+  const items = parsePlan("# T\n## Acceptance\n- a1: `false` exits 0\n- a2: `true` exits 0\n- a3: manual: look\n- a4: deferred: later\n").acceptance
+  const r = acceptanceReport(items, { a1: { code: 1, output: "no" }, a2: { code: 0, output: "" } })
+  assert.match(r, /a1: fails \(exit 1\), as it must/)
+  assert.match(r, /a2: passes on the current tree: it does not measure the change\. Rewrite it or drop it, then check again/)
+  assert.match(r, /a3: manual, not run/)
+  assert.ok(!r.includes("a4"))
+  assert.match(acceptanceReport([], {}), /No acceptance items/)
 })
 
 test("scout: a read-only agent on the small role", () => {

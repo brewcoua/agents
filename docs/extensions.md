@@ -222,7 +222,8 @@ A task's `role` (`small` or `large`) is a role of the active profile ([Profiles]
 read-only: `edit` and `write` are refused outside `.pi/plans/`, and `bash` runs only what guardrails
 allow without asking. An `ask` verdict counts as a refusal here, since the model has nobody to ask.
 Other tools (memory, MCP, codemode) are refused too. The model asks you with `ask_user_question`,
-researches with `read`, `grep`, `find`, `ls` and `scout`, and writes `.pi/plans/<slug>.md`.
+researches with `read`, `grep`, `find`, `ls`, `scout`, and the `agent` tool for new `scout`, `research`,
+`locate` and `precedent` agents without a worktree, and writes `.pi/plans/<slug>.md`.
 
 `scout` takes up to 6 questions and starts one `plan-scout` agent per question, in parallel, on the
 `small` role, with only `read`, `grep`, `find` and `ls`. Each has 180 seconds and its answer is cut
@@ -230,6 +231,26 @@ at 8000 characters; a failed scout reports its error. Scouts need the agents ext
 
 `/plan cancel` leaves plan mode without approving. Leaving restores the model you were using. Plan mode
 survives a resume.
+
+### Build and research
+
+`/build <request>` is `/plan` with stages the model takes in order, stopping only for your decisions:
+
+1. Intake: your intent first, with no recommended option, then only the questions whose answers change
+   the work, each citing the code it comes from.
+2. Research: 3 to 6 questions, one agent each, written to `.pi/plans/<slug>.research.md` with sources.
+   The model decides whether it runs; `--research` forces it, `--no-research` skips it.
+3. Approaches: 2 or 3, with what each keeps and costs. You pick one; the choice goes under `## Decisions`.
+4. Acceptance: `## Acceptance` written from the request. The model calls `acceptance_check`, which runs
+   each command item in the project: every one must fail before the change, and one that passes is
+   rewritten or dropped.
+5. Plan: the tasks, every acceptance item covered or deferred.
+
+It ends with a draft ready for `/plan review` and `/plan approve`, as above.
+
+`/research <question>` runs stage 2 alone and leaves plan mode once the research file is written;
+`/plan approve` refuses it. `/build --from <slug>` reads `.pi/plans/<slug>.research.md` and starts at
+stage 3, into `.pi/plans/<slug>.md`, which must not exist yet.
 
 ### The plan file
 

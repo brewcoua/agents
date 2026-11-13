@@ -159,7 +159,9 @@ export function commentsMessage(path: string, comments: Comment[]): string {
 }
 
 // Tools a planning session may call as they are; guardrails still judges them.
-const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "scout", "ask_user_question", "web_search", "web_fetch"])
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "scout", "ask_user_question", "web_search", "web_fetch", "agent_result", "acceptance_check"])
+// Agent types a planning session may start: none of them writes.
+const READ_ONLY_AGENTS = ["scout", "research", "locate", "precedent"]
 
 // ask counts as deny: there is nobody to answer while the model plans.
 export function planVerdict(rules: Rules, tool: string, input: Record<string, unknown>, cwd: string): Decision {
@@ -172,6 +174,10 @@ export function planVerdict(rules: Rules, tool: string, input: Record<string, un
     const d = checkCommand(rules, String(input.command ?? ""), cwd)
     if (d.verdict === "allow") return d
     return { verdict: "deny", reason: `plan mode: only read-only commands run (${d.reason})` }
+  }
+  if (tool === "agent") {
+    if (READ_ONLY_AGENTS.includes(String(input.type)) && !input.resume && input.isolation !== "worktree") return { verdict: "allow", reason: "" }
+    return { verdict: "deny", reason: `plan mode: only ${READ_ONLY_AGENTS.join(", ")} agents, new and without a worktree` }
   }
   if (READ_ONLY_TOOLS.has(tool)) return { verdict: "allow", reason: "" }
   return { verdict: "deny", reason: `plan mode: the ${tool} tool is not available` }
@@ -229,4 +235,72 @@ export function planPrompt(path: string): string {
 
 export function implementMessage(path: string, text: string): string {
   return `The plan at ${path} is approved. Implement it now, in this session, and run its verify command.\n\n${text}`
+}
+
+// /build and /research: plan mode with stages. research: forced on or off; absent, the model decides.
+export type Mode = { path: string; mode?: "build" | "research"; research?: boolean; from?: boolean }
+
+export function buildArgs(args: string): { request?: string; from?: string; research?: boolean } | { error: string } {
+  const words = args.trim().split(/\s+/).filter(Boolean)
+  const usage = { error: "usage: /build [--research | --no-research] <request>, or /build --from <slug>" }
+  if (words[0] === "--from") return words.length === 2 ? { from: words[1] } : usage
+  const research = words[0] === "--research" ? true : words[0] === "--no-research" ? false : undefined
+  const rest = research === undefined ? words : words.slice(1)
+  if (!rest.length || rest[0].startsWith("--")) return usage
+  return { request: rest.join(" "), ...(research === undefined ? {} : { research }) }
+}
+
+export const researchPath = (path: string) => path.replace(/\.md$/, ".research.md")
+
+const researchSteps = (path: string) =>
+  "Turn the request into 3 to 6 questions and start one agent per question with the agent tool, all in one turn: scout (documentation " +
+  "and the web), research (broad questions: what other tools do, how designs compare), locate (where the code involved lives), " +
+  `precedent (past commits on that code, and the fixes that followed). Write ${researchPath(path)}: each finding with its source, ` +
+  "a URL or file:line, and the questions no agent answered listed as open, not guessed."
+
+const LATER = (path: string) => [
+  "3. Approaches. Propose 2 or 3 approaches, each with what it keeps, what it costs and the findings it rests on. The user picks one " +
+    "with ask_user_question, combines them, or sends research back with a new question. Record the choice under ## Decisions.",
+  `4. Acceptance. Write ## Acceptance in ${path} from the request alone; research only helps write the commands. Items a1, a2, ..., ` +
+    "each a read-only command that measures the outcome itself, or manual when no command can. Call acceptance_check: every command " +
+    "must fail on the current tree. Rewrite or drop one that passes, and check again.",
+  "5. Plan. Write the tasks of the chosen approach. Every acceptance item is covered by a task or deferred with a reason; nothing " +
+    "outside the request is planned. Prefer mode tdd. No implementation code in the plan: the tests drive the design.",
+  "Then say the plan is ready for /plan review, and stop.",
+]
+
+export function modePrompt(m: Mode): string {
+  const name = (m.path.split("/").pop() ?? "").replace(/\.md$/, "")
+  if (m.mode === "research")
+    return [`[RESEARCH] Research the user's question, and do not plan. ${researchSteps(m.path)}`, `Then stop; /build --from ${name} builds from it.`].join("\n")
+  if (m.mode !== "build") return ""
+  const research =
+    m.research === true ? "Research runs: the user asked for it." :
+    m.research === false ? "Skip research: the user said so." :
+    "Decide whether research runs, and say why: it runs for a new feature, an unfamiliar library or a choice between designs, " +
+      "and is skipped for a change you can place in a file or two."
+  const first = m.from
+    ? [`[BUILD] This plan is a build, from research done before. Read ${researchPath(m.path)}, then take it through these stages; stop only where a decision is the user's.`]
+    : [
+        "[BUILD] This plan is a build: take the request through these stages, in order, and stop only where a decision is the user's.",
+        "1. Intake. Ask with ask_user_question: first the user's intent, with no recommended option; then only the questions whose " +
+          "answers change the work, each citing the code it comes from (file:line) and offering 2 to 4 options stated as tradeoffs " +
+          '("keeps X, loses Y"). No confirmation questions, no closing "looks good?".',
+        `2. Research. ${research} ${researchSteps(m.path)}`,
+      ]
+  return [...first, ...LATER(m.path)].join("\n")
+}
+
+// acceptance_check's answer: an item that passes before the change measures nothing.
+export function acceptanceReport(items: Acceptance[], results: Record<string, { code: number | null; output: string }>): string {
+  if (!items.length) return "No acceptance items: write ## Acceptance in the plan first."
+  return items
+    .filter((a) => a.kind !== "deferred")
+    .map((a) => {
+      if (a.kind === "manual") return `${a.id}: manual, not run.`
+      const r = results[a.id]
+      if (r.code !== 0) return `${a.id}: fails (exit ${r.code}), as it must.`
+      return `${a.id}: passes on the current tree: it does not measure the change. Rewrite it or drop it, then check again.`
+    })
+    .join("\n")
 }
